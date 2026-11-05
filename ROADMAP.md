@@ -10,7 +10,7 @@
 | 단계 | 내용 | 완료 기준 | 상태 |
 |---|---|---|---|
 | 0. 기반 | 저장소, 프로젝트 구조, 샘플 데이터 스크립트, 테스트 실행 | `pytest` 통과 | ✅ |
-| 1. FCS 읽기 | FCS 2.0/3.0/3.1, 키워드, 채널(PnN/PnS), 이벤트 행렬 | 샘플 파일의 채널·이벤트 수 일치 | ⬜ |
+| 1. FCS 읽기 | FCS 2.0/3.0/3.1, 키워드, 채널(PnN/PnS), 이벤트 행렬 | 샘플 파일의 채널·이벤트 수 일치 | ✅ |
 | 2. 보정·변환 | `$SPILLOVER` 보정, Linear / Log / Biex / Logicle / Arcsinh | FlowJo 변환 참조값과 일치 | ⬜ |
 | 3. 그래프 | Dot, Pseudocolor, Contour, Density, Histogram | 스크린샷 확인 | ⬜ |
 | 4. 게이팅 | Polygon, Rectangle, Ellipse, Quadrant, Range, Boolean, 게이트 트리 | `.wsp` 게이트 이벤트 수 일치 | ⬜ |
@@ -22,3 +22,15 @@
 | 선택 | tSNE/UMAP, FlowSOM, 세포 주기, 증식 분석 | — | ⬜ |
 
 각 단계는 별도 브랜치에서 작업하고, 테스트 통과 후 `main`에 합친다.
+
+## 단계별 기록
+
+### 1단계 (FCS 읽기)
+- `cytogate.io.load_fcs()` / `load_folder()`, 명령줄 `python -m cytogate info <파일|폴더>`
+- 키워드는 파일에 적힌 이름 그대로(`$TOT`, `$P1N` …) 읽으며, FlowJo가 `.wsp`에 기록한 값과 모두 일치
+- Time 채널은 FlowJo와 같이 `$TIMESTEP`을 곱한 초 단위
+- 표준을 어긴 파일(오프셋 불일치, 잘못된 `$TIMESTEP`)도 읽고 경고를 남김
+
+### 4단계에서 처리할 것
+- FlowJo는 축 끝에 닿은 게이트를 바깥쪽으로 열린 범위로 취급한다.
+  예: E01 샘플 Time 게이트(1.28–180.48 s)에서 FlowJo 290,172개, 경계값 그대로 계산하면 290,166개.

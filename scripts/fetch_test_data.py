@@ -16,6 +16,10 @@ FILES = [
     "8_color_data_set/8_color_ICS.wsp",
     "8_color_data_set/den_comp.csv",
     "test_comp_example.fcs",
+    "test_data_2d_01.fcs",
+    "100715.fcs",
+    "noncompliant/data_start_offset_discrepancy_example.fcs",
+    "noncompliant/data_stop_offset_discrepancy_example.fcs",
     "flowjo_xforms/tr_biex_l256_w-7.943282_n1.000000_m4.418540_r262144.000029.csv",
 ]
 
