@@ -288,9 +288,14 @@ def axis_ticks(xf: Transform) -> list[Tick]:
     # Drop labels that would crowd each other (e.g. 10^0..10^2 squeezed into
     # the linear region of a biex axis). "0" goes first, then larger
     # magnitudes, so the outcome is the same on both sides of zero.
-    kept: list[float] = []
+    labelled: list[float] = []
     for t in sorted((t for t in ticks if t.label), key=lambda t: (t.value != 0, -abs(t.value))):
-        if all(abs(t.position - p) >= 0.04 for p in kept):
-            kept.append(t.position)
-    shown = [t if not t.label or t.position in kept else Tick(t.position, t.value, "", True) for t in ticks]
+        if all(abs(t.position - p) >= 0.04 for p in labelled):
+            labelled.append(t.position)
+    ticks = [t if not t.label or t.position in labelled else Tick(t.position, t.value, "", True) for t in ticks]
+    # Likewise drop unlabelled ticks that would merge into a solid block.
+    shown: list[Tick] = []
+    for t in sorted(ticks, key=lambda t: (not t.label, not t.major, -abs(t.value))):
+        if t.label or all(abs(t.position - s.position) >= 0.006 for s in shown):
+            shown.append(t)
     return sorted(shown, key=lambda t: t.position)

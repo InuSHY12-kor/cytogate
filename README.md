@@ -10,6 +10,34 @@
 
 진행 계획은 [ROADMAP.md](ROADMAP.md)를 보세요.
 
+![메인 화면](docs/images/main_window.png)
+
+## 실행 (Windows)
+
+Python 3.11 이상이 필요합니다. 명령 프롬프트(cmd)에서 저장소 폴더로 이동한 뒤:
+
+```bash
+python -m venv .venv
+```
+
+```bash
+.venv\Scripts\activate
+```
+
+```bash
+pip install -e ".[gui]"
+```
+
+```bash
+python -m cytogate gui
+```
+
+창이 열리면 **Add Samples…** / **Add Folder…** 로 FCS 파일을 불러오거나, 파일을 창에 끌어다 놓으면 됩니다.
+
+| Pseudocolor | Contour | Density | Histogram |
+|---|---|---|---|
+| ![](docs/images/pseudocolor.png) | ![](docs/images/contour.png) | ![](docs/images/density.png) | ![](docs/images/histogram_cd3.png) |
+
 ## 개발 환경 설정
 
 ```bash

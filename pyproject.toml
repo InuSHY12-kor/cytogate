@@ -16,6 +16,9 @@ dependencies = [
     "flowkit>=1.2",
 ]
 
+[project.gui-scripts]
+cytogate = "cytogate.gui.app:main"
+
 [project.optional-dependencies]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
 dev = ["pytest>=8"]

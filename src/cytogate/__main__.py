@@ -1,4 +1,7 @@
-"""Command line: python -m cytogate info <file-or-folder> [--keywords]"""
+"""Command line:
+    python -m cytogate gui [files…]
+    python -m cytogate info <file-or-folder> [--keywords]
+"""
 
 from __future__ import annotations
 
@@ -40,7 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     p_info = sub.add_parser("info", help="show channels and keywords of FCS files")
     p_info.add_argument("path", type=Path)
     p_info.add_argument("--keywords", action="store_true", help="list all keywords")
+    p_gui = sub.add_parser("gui", help="open the desktop app")
+    p_gui.add_argument("files", nargs="*", help="FCS files or folders to open")
     args = parser.parse_args(argv)
+    if args.cmd == "gui":
+        from .gui.app import main as gui_main
+        return gui_main(args.files)
     if args.cmd == "info":
         return _info(args.path, args.keywords)
     return 2

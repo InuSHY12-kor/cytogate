@@ -12,7 +12,7 @@
 | 0. 기반 | 저장소, 프로젝트 구조, 샘플 데이터 스크립트, 테스트 실행 | `pytest` 통과 | ✅ |
 | 1. FCS 읽기 | FCS 2.0/3.0/3.1, 키워드, 채널(PnN/PnS), 이벤트 행렬 | 샘플 파일의 채널·이벤트 수 일치 | ✅ |
 | 2. 보정·변환 | `$SPILLOVER` 보정, Linear / Log / Biex / Logicle / Arcsinh | FlowJo 변환 참조값과 일치 | ✅ |
-| 3. 그래프 | Dot, Pseudocolor, Contour, Density, Histogram | 스크린샷 확인 | ⬜ |
+| 3. 그래프 | Dot, Pseudocolor, Contour, Density, Histogram | 스크린샷 확인 | ✅ |
 | 4. 게이팅 | Polygon, Rectangle, Ellipse, Quadrant, Range, Boolean, 게이트 트리 | `.wsp` 게이트 이벤트 수 일치 | ⬜ |
 | 5. 통계 | Count, Freq. of Parent/Total/Grandparent, Median, Mean, Geo. Mean, CV, SD, rCV | FlowJo 계산식과 일치 | ⬜ |
 | 6. 그룹·일괄 적용 | 그룹, 게이트 일괄 적용, 샘플별 조정 | 여러 파일 일괄 처리 | ⬜ |
@@ -39,6 +39,12 @@
 - Logicle은 Moore & Parks(2012) 공식으로 독립 검산
 - 축 눈금: 선형 0, 50K, 100K …, 로그형 0, 10³, 10⁴, 10⁵ (+ 2–9 보조 눈금)
 - 기본 변환: 산란광 Linear 0–PnR, Time Linear(실제 범위), 형광 Biex(width −10, pos 4.42)
+
+### 3단계 (그래프)
+- 데스크톱 창(PySide6 + pyqtgraph): 샘플 목록(#Cells), X/Y 파라미터, 축 변환 선택·세부 설정, 그래프 종류, PNG 내보내기, 파일 끌어다 놓기
+- 그래프: Dot, Pseudocolor(기본), Contour(5% 확률 등고선 + 바깥 점), Density, Histogram(Count / Normalized To Mode)
+- 축 범위를 벗어난 이벤트는 FlowJo처럼 축 가장자리에 쌓아 표시
+- 계산부(`cytogate.plots`)는 화면 없이 테스트, 화면은 offscreen으로 테스트·스크린샷(`scripts/screenshots.py`)
 
 ### 4단계에서 처리할 것
 - E01 샘플 Time 게이트(1.28–180.48 s): FlowJo 290,172개, 경계값 그대로 계산하면 290,166개(6개 차이).
