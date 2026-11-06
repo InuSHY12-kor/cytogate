@@ -85,6 +85,23 @@ def main() -> None:
     win.grab().save(str(OUT / "gating.png"))
     print("saved gating")
 
+    # groups: apply E01's whole tree to every sample, then look at E05
+    win.select(e01)
+    win.apply_to_current_group()
+    win.ask_group_name = lambda: "Stimulated"
+    win.tree.clearSelection()
+    for n in ("101_DEN084Y5_15_E03_009_clean.fcs", "101_DEN084Y5_15_E05_010_clean.fcs"):
+        win.sample_item(n).setSelected(True)
+    win.new_group_dialog()
+    e05 = "101_DEN084Y5_15_E05_010_clean.fcs"
+    win.select(e05, ("Lymphocytes",))
+    win.x_box.setCurrentIndex(win.x_box.findData("FSC-A"))
+    win.y_box.setCurrentIndex(win.y_box.findData("SSC-A"))
+    win.select(e05)
+    app.processEvents()
+    win.grab().save(str(OUT / "groups.png"))
+    print("saved groups")
+
 
 if __name__ == "__main__":
     main()

@@ -24,7 +24,7 @@ import numpy as np
 
 __all__ = [
     "Gate", "RectangleGate", "PolygonGate", "EllipseGate", "BooleanGate",
-    "Population", "GatingTree", "quadrant_gates", "EDGE",
+    "Population", "GatingTree", "quadrant_gates", "translate_gate", "EDGE",
 ]
 
 # A boundary this close to an axis edge (in display units) counts as being on
@@ -202,6 +202,37 @@ class BooleanGate(Gate):
         return ~masks[0]
 
 
+def translate_gate(gate: Gate, ps, deltas: dict[str, float]) -> Gate:
+    """Gate moved on the plot by `deltas` (display units per parameter name).
+
+    The move happens in display space, as the user sees it, and the result is
+    stored back in data units. Unbounded sides stay unbounded.
+    """
+    import dataclasses
+
+    names = [ps.parameter(d).name for d in gate.dims]
+    shift = [deltas.get(n, 0.0) for n in names]
+    xfs = [ps.transforms[n] for n in names]
+
+    def move(i: int, v: float | None) -> float | None:
+        if v is None or shift[i] == 0.0:
+            return v
+        p = float(xfs[i].apply(np.array([v]))[0]) + shift[i]
+        return float(xfs[i].inverse(np.array([p]))[0])
+
+    if isinstance(gate, RectangleGate):
+        return dataclasses.replace(
+            gate,
+            mins=tuple(move(i, v) for i, v in enumerate(gate.mins)),
+            maxs=tuple(move(i, v) for i, v in enumerate(gate.maxs)),
+        )
+    if isinstance(gate, PolygonGate):
+        return dataclasses.replace(gate, vertices=tuple((move(0, x), move(1, y)) for x, y in gate.vertices))
+    if isinstance(gate, EllipseGate):
+        return dataclasses.replace(gate, center=(gate.center[0] + shift[0], gate.center[1] + shift[1]))
+    raise TypeError(f"{type(gate).__name__} cannot be moved")
+
+
 def quadrant_gates(x: str, y: str, x_split: float, y_split: float, x_name: str = "", y_name: str = ""):
     """FlowJo-style quadrants as four (name, RectangleGate) pairs: Q1 top-left, then clockwise."""
     xn, yn = x_name or x, y_name or y
@@ -223,6 +254,9 @@ class Population:
     # display units (x: 0..1 of the axis; y: 0..1 of the plot height).
     label_offset: tuple[float, float] = (0.0, 0.0)
     stats: list = field(default_factory=list)  # StatSpec nodes shown under the population
+    # Name of the group this gate was applied from (FlowJo "owningGroup").
+    # None = the gate belongs to this sample only.
+    owning_group: str | None = None
 
     @property
     def path(self) -> tuple[str, ...]:
@@ -260,6 +294,12 @@ class GatingTree:
     def remove(self, path) -> None:
         pop = self.get(path)
         pop.parent.children.remove(pop)
+
+    def replace_gate(self, path, gate: Gate) -> Population:
+        """Change a population's gate, keeping its children and statistics."""
+        pop = self.get(path)
+        pop.gate = gate
+        return pop
 
     def __iter__(self) -> Iterator[Population]:
         """All populations, depth first (root excluded)."""

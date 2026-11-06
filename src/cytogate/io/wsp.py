@@ -105,6 +105,7 @@ def _walk(sub_el: ET.Element, tree: GatingTree, parent_path: tuple, counts: dict
             gate = BooleanGate(op, refs)
         pop = tree.add(parent_path, name, gate)
         counts[pop.path] = int(el.get("count", "-1"))
+        pop.owning_group = el.get("owningGroup") or None
         for sp in el.findall("Subpopulations"):
             _walk(sp, tree, pop.path, counts)
 

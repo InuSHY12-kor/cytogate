@@ -352,3 +352,103 @@ def test_stat_dialog(app):
     dlg.pct_box.setValue(95)
     s = dlg.spec()
     assert (s.stat, s.parameter, s.percentile) == (Stat.PERCENTILE, "Comp-R780-A", 95)
+
+
+# --- groups and moving gates (phase 6) ----------------------------------------------
+
+E03, E05 = "101_DEN084Y5_15_E03_009_clean.fcs", "101_DEN084Y5_15_E05_010_clean.fcs"
+
+
+def group_rows(w):
+    return [w.group_list.item(i).text() for i in range(w.group_list.count())]
+
+
+def test_new_group_from_selection_filters_samples(gw, monkeypatch):
+    monkeypatch.setattr(gw, "ask_group_name", lambda: "Stim")
+    gw.tree.clearSelection()
+    gw.sample_item(E03).setSelected(True)
+    gw.sample_item(E05).setSelected(True)
+    assert gw.new_group_dialog() == "Stim"
+    assert group_rows(gw) == ["All Samples (3)", "Stim (2)"]
+    assert gw.current_group() == "Stim"
+    assert gw.sample_item(E01).isHidden() and not gw.sample_item(E03).isHidden()
+    assert gw.selection()[0].name in (E03, E05)  # selection moved to a visible sample
+    gw.group_list.setCurrentRow(0)
+    assert not gw.sample_item(E01).isHidden()
+    gw.group_list.setCurrentRow(1)
+    gw.delete_current_group()
+    assert group_rows(gw) == ["All Samples (3)"]
+
+
+def test_apply_to_group_from_window(gw):
+    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    gw.select(E01, ("Rectangle",))
+    result = gw.apply_to_current_group()
+    assert result.added == [E03, E05]
+    for n in (E01, E03, E05):
+        item = gw.find_item(n, ("Rectangle",))
+        assert item.font(0).bold()
+        assert item.text(2) == f"{gw.samples[n].count(('Rectangle',)):,}"
+
+
+def _drag_gate(gw, app, start, end):
+    _drag(gw.view.plot, gw.view.viewbox, start, end, app)
+
+
+def test_move_group_gate_for_whole_group(gw, app, monkeypatch):
+    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    gw.select(E01, ("Rectangle",))
+    gw.apply_to_current_group()
+    gw.select(E01)
+    asked = []
+    monkeypatch.setattr(gw, "ask_scope", lambda g, n: asked.append((g, n)) or "group")
+    app.processEvents()
+    _drag_gate(gw, app, (0.3, 0.1), (0.4, 0.15))  # inside the gate, away from its label
+    assert asked == [("All Samples", 3)]
+    xf = gw.samples[E01].ps.transforms["FSC-A"]
+    for n in (E01, E03, E05):
+        g = gw.samples[n].gates.get(("Rectangle",)).gate
+        assert xf.apply([g.mins[0]])[0] == pytest.approx(0.3, abs=0.02)
+
+
+def test_move_group_gate_for_one_sample(gw, app, monkeypatch):
+    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    gw.select(E01, ("Rectangle",))
+    gw.apply_to_current_group()
+    gw.select(E03)
+    monkeypatch.setattr(gw, "ask_scope", lambda g, n: "sample")
+    app.processEvents()
+    _drag_gate(gw, app, (0.3, 0.1), (0.3, 0.2))
+    a1, a3 = gw.samples[E01], gw.samples[E03]
+    assert a1.gates.get(("Rectangle",)).gate != a3.gates.get(("Rectangle",)).gate
+    assert a3.gates.get(("Rectangle",)).owning_group is None
+    assert not gw.find_item(E03, ("Rectangle",)).font(0).bold()
+    assert gw.find_item(E01, ("Rectangle",)).font(0).bold()
+
+
+def test_move_own_gate_without_asking(gw, app, monkeypatch):
+    gw.shape_drawn("Ellipse", [(0.2, 0.05), (0.6, 0.35)])
+    monkeypatch.setattr(gw, "ask_scope", lambda g, n: pytest.fail("should not ask"))
+    app.processEvents()
+    _drag_gate(gw, app, (0.4, 0.12), (0.5, 0.12))
+    g = gw.samples[E01].gates.get(("Ellipse",)).gate
+    assert g.center == pytest.approx((0.5, 0.2), abs=0.02)
+
+
+def test_quadrants_are_not_dragged(gw):
+    gw.x_box.setCurrentIndex(gw.x_box.findData("Comp-CD4 PE-Cy7 FLR-A"))
+    gw.y_box.setCurrentIndex(gw.y_box.findData("Comp-CD8 PerCP-Cy55 FLR-A"))
+    gw.shape_drawn("Quadrant", [(0.45, 0.45)])
+    assert all(s.on_moved is None for s in gw.view.gate_shapes())
+
+
+def test_apply_skips_samples_without_parent(gw, monkeypatch):
+    warned = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: warned.append(a[2]))
+    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    gw.select(E01, ("Rectangle",))
+    gw.shape_drawn("Ellipse", [(0.3, 0.1), (0.5, 0.3)])
+    gw.select(E01, ("Rectangle", "Ellipse"))
+    result = gw.apply_to_current_group()
+    assert set(result.skipped) == {E03, E05}
+    assert warned and E03 in warned[0]

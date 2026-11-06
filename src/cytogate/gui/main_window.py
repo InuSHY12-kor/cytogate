@@ -13,6 +13,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core import EllipseGate, PolygonGate, ProcessedSample, RectangleGate, quadrant_gates
 from ..core.analysis import AnalyzedSample
+from ..core.gating import translate_gate
+from ..core.workspace import ALL_SAMPLES, Workspace
 from ..io import FcsReadError, load_fcs
 from ..plots import HistogramY, PlotType
 from .gate_tools import TOOLS
@@ -31,7 +33,16 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("CytoGate")
         self.resize(1200, 760)
-        self.samples: dict[str, AnalyzedSample] = {}
+        self.ws = Workspace()
+        self.samples: dict[str, AnalyzedSample] = self.ws.samples  # same dict
+
+        # groups pane (FlowJo's group list above the samples)
+        self.group_list = QtWidgets.QListWidget()
+        self.group_list.setMaximumHeight(130)
+        self.group_list.currentItemChanged.connect(lambda *_: self._group_changed())
+        group_bar = QtWidgets.QToolBar("Groups")
+        group_bar.addAction("New Group…", self.new_group_dialog)
+        group_bar.addAction("Delete Group", self.delete_current_group)
 
         # workspace tree: samples with their populations (FlowJo-style columns)
         self.tree = QtWidgets.QTreeWidget()
@@ -41,6 +52,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
         for col in (1, 2):
             header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.currentItemChanged.connect(lambda *_: self._selection_changed())
         QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Delete, self.tree, activated=self.delete_selected_gate)
 
@@ -87,6 +99,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gate_bar.addAction("Delete", self.delete_selected_gate)
         self.gate_bar.addSeparator()
         self.gate_bar.addAction("Add Statistic…", self.add_stat_dialog)
+        self.gate_bar.addSeparator()
+        self.gate_bar.addAction("Apply to Group", self.apply_to_current_group)
 
         self.view = PlotView()
         self.view.viewbox.shapeDrawn.connect(self.shape_drawn)
@@ -96,8 +110,16 @@ class MainWindow(QtWidgets.QMainWindow):
         rl.addWidget(self.gate_bar)
         rl.addWidget(self.view, 1)
 
+        left = QtWidgets.QWidget()
+        ll = QtWidgets.QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(QtWidgets.QLabel("Groups"))
+        ll.addWidget(group_bar)
+        ll.addWidget(self.group_list)
+        ll.addWidget(self.tree, 1)
+
         split = QtWidgets.QSplitter()
-        split.addWidget(self.tree)
+        split.addWidget(left)
         split.addWidget(right)
         split.setSizes([480, 720])
         self.setCentralWidget(split)
@@ -133,9 +155,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 except (FcsReadError, KeyError, ValueError) as exc:
                     errors.append(f"{f.name}: {exc}")
                     continue
-                if a.name in self.samples:
+                if not self.ws.add_sample(a):
                     continue
-                self.samples[a.name] = a
                 item = QtWidgets.QTreeWidgetItem([a.name, "", f"{a.ps.event_count:,}"])
                 item.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight)
                 item.setData(0, ROLE, (a.name, ()))
@@ -144,8 +165,100 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         if errors:
             QtWidgets.QMessageBox.warning(self, "Some files could not be read", "\n".join(errors))
+        self.refresh_groups()
         self.statusBar().showMessage(f"{len(self.samples)} samples")
         return errors
+
+    # --- groups -----------------------------------------------------------
+    def current_group(self) -> str:
+        item = self.group_list.currentItem()
+        return item.data(ROLE) if item else ALL_SAMPLES
+
+    def refresh_groups(self, select: str | None = None) -> None:
+        keep = select or self.current_group()
+        self.group_list.blockSignals(True)
+        self.group_list.clear()
+        for name, g in self.ws.groups.items():
+            it = QtWidgets.QListWidgetItem(f"{name} ({len(g.samples)})")
+            it.setData(ROLE, name)
+            self.group_list.addItem(it)
+            if name == keep:
+                self.group_list.setCurrentItem(it)
+        if self.group_list.currentItem() is None and self.group_list.count():
+            self.group_list.setCurrentRow(0)
+        self.group_list.blockSignals(False)
+        self._group_changed()
+
+    def _group_changed(self) -> None:
+        """Show only the samples of the selected group."""
+        members = set(self.ws.group(self.current_group()).samples) if self.samples else set()
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            it.setHidden(it.data(0, ROLE)[0] not in members)
+        cur = self.tree.currentItem()
+        if cur is not None and cur.isHidden() or cur is None:
+            visible = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())
+                       if not self.tree.topLevelItem(i).isHidden()]
+            if visible:
+                self.tree.setCurrentItem(visible[0])
+
+    def selected_sample_names(self) -> list[str]:
+        names = []
+        for it in self.tree.selectedItems():
+            name = it.data(0, ROLE)[0]
+            if name not in names:
+                names.append(name)
+        return names
+
+    def ask_group_name(self) -> str | None:
+        """Prompt for a new group name (replaced in tests)."""
+        name, ok = QtWidgets.QInputDialog.getText(self, "New Group", "Group name:")
+        return name.strip() if ok and name.strip() else None
+
+    def new_group_dialog(self) -> str | None:
+        """Make a group from the selected samples (or the current one)."""
+        members = self.selected_sample_names() or ([self.selection()[0].name] if self.selection()[0] else [])
+        name = self.ask_group_name()
+        if not name:
+            return None
+        try:
+            self.ws.create_group(name, members)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Group", str(exc))
+            return None
+        self.refresh_groups(select=name)
+        return name
+
+    def delete_current_group(self) -> None:
+        name = self.current_group()
+        if name == ALL_SAMPLES:
+            return
+        self.ws.delete_group(name)
+        self.refresh_groups(select=ALL_SAMPLES)
+        for n in self.samples:
+            self.refresh_tree(n)
+
+    def apply_to_current_group(self):
+        """Copy the selected population (or a sample's whole gate tree) to every
+        sample in the current group."""
+        a, path = self.selection()
+        if a is None:
+            return None
+        group = self.current_group()
+        if not path and not a.gates.root.children:
+            return None
+        result = self.ws.apply_to_group(a.name, path, group)
+        for n in self.ws.group(group).samples:
+            self.refresh_tree(n)
+        self.select(a.name, path)
+        msg = f"Applied to {len(result.added) + len(result.updated)} sample(s) in {group}"
+        if result.skipped:
+            msg += f"; skipped {len(result.skipped)}"
+            QtWidgets.QMessageBox.warning(
+                self, "Apply to Group",
+                "Not applied to:\n" + "\n".join(f"{k}: {v}" for k, v in result.skipped.items()))
+        self.statusBar().showMessage(msg)
+        return result
 
     def add_samples_dialog(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Add Samples", "", "FCS files (*.fcs *.FCS);;All files (*)")
@@ -240,6 +353,11 @@ class MainWindow(QtWidgets.QMainWindow):
             for col in (1, 2):
                 it.setTextAlignment(col, QtCore.Qt.AlignmentFlag.AlignRight)
             it.setData(0, ROLE, (name, pop.path))
+            if pop.owning_group:
+                font = it.font(0)
+                font.setBold(True)
+                it.setFont(0, font)
+                it.setToolTip(0, f"Group gate: {pop.owning_group}")
             parent_item.addChild(it)
             add_stats(it, pop)
             for c in pop.children:
@@ -423,7 +541,44 @@ class MainWindow(QtWidgets.QMainWindow):
             a.ps, x, y,
             [(c.name, c.gate, a.freq_of_parent(c.path), c.label_offset, (a.name, c.path)) for c in children if c.gate.dims],
             on_label_moved=self.label_moved,
+            on_gate_moved=self.gate_moved,
         )
+
+    def ask_scope(self, group: str, n: int) -> str | None:
+        """Ask whether a change to a group gate applies to the whole group.
+        Returns "group", "sample" or None (cancel). Replaced in tests."""
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Group gate")
+        box.setText(f"This gate is shared by {n} samples in group \"{group}\".")
+        whole = box.addButton("All samples in group", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        one = box.addButton("This sample only", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return {whole: "group", one: "sample"}.get(box.clickedButton())
+
+    def gate_moved(self, key, dx: float, dy: float) -> list[str]:
+        """A gate was dragged on the plot: move it (display units)."""
+        name, path = key
+        a = self.samples[name]
+        pop = a.gates.get(path)
+        x, y = self.x_box.currentData(), self.y_box.currentData()
+        deltas = {a.ps.parameter(x).name: dx}
+        if y is not None:
+            deltas[a.ps.parameter(y).name] = dy
+        new_gate = translate_gate(pop.gate, a.ps, deltas)
+        linked = self.ws.linked_samples(name, path)
+        whole = True
+        if len(linked) > 1:
+            scope = self.ask_scope(pop.owning_group, len(linked))
+            if scope is None:
+                self.redraw()
+                return []
+            whole = scope == "group"
+        changed = self.ws.update_gate(name, path, new_gate, whole_group=whole)
+        for n in changed:
+            self.refresh_tree(n)
+        self.redraw()
+        return changed
 
     def label_moved(self, key, offset) -> None:
         """A gate label was dragged on the plot; remember where."""

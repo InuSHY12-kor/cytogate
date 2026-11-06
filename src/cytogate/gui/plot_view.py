@@ -71,6 +71,43 @@ def _contour_paths(dens: np.ndarray, levels: np.ndarray) -> tuple[np.ndarray, np
     return np.concatenate(xs), np.concatenate(ys)
 
 
+class GateShape(pg.PlotCurveItem):
+    """Gate outline. When movable, dragging anywhere inside it moves the gate
+    (only while no gate tool is active); `on_moved(dx, dy)` gets the shift in
+    display units."""
+
+    def __init__(self, pts, viewbox, y_scale, on_moved):
+        super().__init__(pts[:, 0], pts[:, 1], pen=GATE_PEN)
+        self.vb = viewbox
+        self.y_scale = y_scale
+        self.on_moved = on_moved
+        path = QtGui.QPainterPath()
+        path.addPolygon(QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in pts]))
+        path.closeSubpath()
+        self._area = path
+        if on_moved:
+            self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
+
+    def _movable(self) -> bool:
+        return self.on_moved is not None and self.vb.tool is None
+
+    def shape(self):
+        return self._area if self.on_moved is not None else super().shape()
+
+    def mouseDragEvent(self, ev):
+        if ev.button() != QtCore.Qt.MouseButton.LeftButton or not self._movable():
+            ev.ignore()
+            return
+        ev.accept()
+        p0 = self.vb.mapSceneToView(ev.buttonDownScenePos())
+        p1 = self.vb.mapSceneToView(ev.scenePos())
+        dx, dy = p1.x() - p0.x(), p1.y() - p0.y()
+        self.setPos(dx, dy)
+        if ev.isFinish():
+            self.setPos(0, 0)
+            self.on_moved(float(dx), float(dy / self.y_scale))
+
+
 class GateLabel(pg.TextItem):
     """Gate name + frequency that the user can drag anywhere on the plot.
 
@@ -158,12 +195,14 @@ class PlotView(QtWidgets.QWidget):
             self.plot.removeItem(item)
         self.gate_items = []
 
-    def show_gates(self, ps: ProcessedSample, x: str, y: str | None, gates, on_label_moved=None) -> list[str]:
+    def show_gates(self, ps: ProcessedSample, x: str, y: str | None, gates, on_label_moved=None,
+                   on_gate_moved=None) -> list[str]:
         """Outline child gates that use these axes.
 
         `gates` = [(name, gate, freq %, label offset, key)]. Labels can be dragged
         with the mouse (when no gate tool is active); `on_label_moved(key, offset)`
-        is called with the new offset. Returns the names drawn.
+        is called with the new offset. Gates other than quadrants can be dragged
+        too: `on_gate_moved(key, dx, dy)` (display units). Returns the names drawn.
         """
         self.clear_gates()
         drawn = []
@@ -174,8 +213,10 @@ class PlotView(QtWidgets.QWidget):
                 continue
             if y is None:
                 pts = pts * np.array([1.0, top * 0.95])
-            curve = pg.PlotCurveItem(pts[:, 0], pts[:, 1], pen=GATE_PEN)
             quad = re.match(r"^(Q[1-4]):", name)
+            movable = on_gate_moved is not None and not quad
+            curve = GateShape(pts, self.viewbox, top,
+                              (lambda dx, dy, k=key: on_gate_moved(k, dx, dy)) if movable else None)
             if quad and y is not None:
                 # FlowJo puts quadrant numbers in the outer corners
                 corner = {"Q1": (0, 1), "Q2": (1, 1), "Q3": (1, 0), "Q4": (0, 0)}[quad.group(1)]
@@ -188,8 +229,9 @@ class PlotView(QtWidgets.QWidget):
                 base = (cx, cy if y is None else float(np.clip(cy, 0.05, 0.95)))
             label = GateLabel(text, anchor, base, offset, top, self.viewbox,
                               (lambda off, k=key: on_label_moved(k, off)) if on_label_moved else None)
+            curve.setZValue(19)
+            label.setZValue(20)  # labels sit above gate areas so they can be dragged
             for item in (curve, label):
-                item.setZValue(20)
                 self.plot.addItem(item, ignoreBounds=True)
                 self.gate_items.append(item)
             drawn.append(name)
@@ -197,6 +239,9 @@ class PlotView(QtWidgets.QWidget):
 
     def gate_labels(self) -> list["GateLabel"]:
         return [i for i in self.gate_items if isinstance(i, GateLabel)]
+
+    def gate_shapes(self) -> list["GateShape"]:
+        return [i for i in self.gate_items if isinstance(i, GateShape)]
 
     def show_sample(
         self,
