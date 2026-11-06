@@ -44,6 +44,9 @@ class DisplayOptions:
     show_outliers: bool = True  # contour plots
     foreground: tuple = (0, 0, 0)  # dots / outliers / histogram line
     background: tuple = (255, 255, 255)
+    color_param: str | None = None  # colour dots by this parameter's median (FlowJo colour map)
+    contour_level: float = 0.05  # probability contour step ("Level 5%")
+    resolution: int = 512  # pixels per axis for 2D plots
 
 
 def gate_outline(gate, ps: ProcessedSample, x: str, y: str | None) -> np.ndarray | None:
@@ -423,8 +426,15 @@ class PlotView(QtWidgets.QWidget):
         ys = ps.scaled(py.name)
         if mask is not None:
             ys = ys[mask]
-        r = render_2d(xs, ys, kind, show_outliers=opts.show_outliers, dot_color=tuple(opts.foreground),
-                      large_dots=opts.large_dots)
+        color = None
+        if opts.color_param:
+            try:
+                color = ps.scaled(opts.color_param)
+                color = color[mask] if mask is not None else color
+            except KeyError:
+                color = None
+        r = render_2d(xs, ys, kind, res=opts.resolution, level=opts.contour_level, show_outliers=opts.show_outliers,
+                      dot_color=tuple(opts.foreground), large_dots=opts.large_dots, color_by=color)
         self.image.setImage(r.image, autoLevels=False)
         self.image.setRect(QtCore.QRectF(0, 0, 1, 1))
         if kind == PlotType.CONTOUR and r.levels.size:

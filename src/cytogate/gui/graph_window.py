@@ -433,6 +433,26 @@ class GraphWindow(QtWidgets.QWidget):
         f.addLayout(colors, 1, 1)
         f.addWidget(self.smooth_box, 1, 2)
         f.addWidget(self.outliers_box, 1, 3)
+        self.color_map_box = QtWidgets.QCheckBox("Color Map Axis")
+        self.color_param_box = QtWidgets.QComboBox()
+        self.color_map_box.toggled.connect(self._color_map_changed)
+        self.color_param_box.currentIndexChanged.connect(self._color_map_changed)
+        self.level_box = QtWidgets.QComboBox()
+        for v in (2, 5, 10, 20):
+            self.level_box.addItem(f"{v}%", v / 100)
+        self.level_box.setCurrentIndex(1)
+        self.level_box.currentIndexChanged.connect(lambda *_: self._set_opt("contour_level", self.level_box.currentData()))
+        self.res_box = QtWidgets.QComboBox()
+        for v in (128, 256, 512, 1024):
+            self.res_box.addItem(str(v), v)
+        self.res_box.setCurrentText("512")
+        self.res_box.currentIndexChanged.connect(lambda *_: self._set_opt("resolution", self.res_box.currentData()))
+        f.addWidget(self.color_map_box, 2, 0)
+        f.addWidget(self.color_param_box, 2, 1)
+        f.addWidget(QtWidgets.QLabel("Contour level"), 2, 2)
+        f.addWidget(self.level_box, 2, 3)
+        f.addWidget(QtWidgets.QLabel("Resolution"), 3, 2)
+        f.addWidget(self.res_box, 3, 3)
         self.options_panel = Collapsible("Options", w)
 
         # Active Gate
@@ -498,6 +518,14 @@ class GraphWindow(QtWidgets.QWidget):
             for p in params:
                 box.addItem(p.label, p.name)
         self.y_box.addItem(HISTOGRAM_CHOICE, None)
+        keep_color = self.color_param_box.currentData()
+        self.color_param_box.blockSignals(True)
+        self.color_param_box.clear()
+        for p in params:
+            self.color_param_box.addItem(p.label, p.name)
+        if keep_color is not None and self.color_param_box.findData(keep_color) >= 0:
+            self.color_param_box.setCurrentIndex(self.color_param_box.findData(keep_color))
+        self.color_param_box.blockSignals(False)
         self.x_box.setCurrentIndex(max(self.x_box.findData(x), 0))
         self.y_box.setCurrentIndex(self.y_box.count() - 1 if y is None else max(self.y_box.findData(y), 0))
         for box in (self.x_box, self.y_box):
@@ -658,6 +686,18 @@ class GraphWindow(QtWidgets.QWidget):
     def _set_opt(self, name: str, value) -> None:
         setattr(self.view.options, name, value)
         self.redraw()
+
+    def _color_map_changed(self, *_) -> None:
+        on = self.color_map_box.isChecked()
+        self.view.options.color_param = self.color_param_box.currentData() if on else None
+        self.redraw()
+
+    def set_color_map(self, param: str | None) -> None:
+        """Colour dots by a third parameter (None turns it off)."""
+        if param is not None:
+            self.color_param_box.setCurrentIndex(self.color_param_box.findData(param))
+        self.color_map_box.setChecked(param is not None)
+        self._color_map_changed()
 
     def _set_uncompensated(self, on: bool) -> None:
         self.show_uncompensated = on

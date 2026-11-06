@@ -356,3 +356,20 @@ def test_print_to_pdf(g, tmp_path):
     printer.setOutputFileName(str(out))
     g.print_to(printer)
     assert out.stat().st_size > 1000
+
+
+def test_color_map_contour_level_resolution(win, g):
+    g.set_axes("Comp-CD4 PE-Cy7 FLR-A", "Comp-CD8 PerCP-Cy55 FLR-A")
+    plain = g.view.last_render.image.copy()
+    g.set_color_map("Comp-CD3 APC-H7 FLR-A")
+    assert g.view.options.color_param == "Comp-CD3 APC-H7 FLR-A"
+    coloured = g.view.last_render.image
+    assert not np.array_equal(plain, coloured)
+    g.set_color_map(None)
+    assert np.array_equal(g.view.last_render.image, plain)
+    g.res_box.setCurrentText("256")
+    assert g.view.last_render.image.shape[:2] == (256, 256)
+    g.type_box.setCurrentText("Contour")
+    n5 = g.view.last_render.levels.size
+    g.level_box.setCurrentText("20%")
+    assert g.view.last_render.levels.size < n5
