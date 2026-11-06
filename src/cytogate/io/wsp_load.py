@@ -97,5 +97,10 @@ def load_workspace(path, search_dirs=(), locate=None) -> OpenedWorkspace:
                     a.gates.get(p).label_offset = tuple(off)
                 except KeyError:
                     pass
+        from ..core.workspace import Criterion
+        for gname, crit in data.get("groups", {}).items():
+            if gname in ws._groups:
+                ws._groups[gname].criteria = [Criterion(**c) for c in crit]
+        ws.refresh_groups()
         extras = data.get("extras", {})
     return OpenedWorkspace(ws, missing, extras, wsp.flowjo_version)

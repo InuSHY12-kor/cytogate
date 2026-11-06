@@ -217,6 +217,7 @@ def write_wsp(path, workspace, extras: dict | None = None) -> Path:
         }
     ET.indent(root, space="  ")
     path.write_bytes(b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8"))
+    side["groups"] = {g.name: [vars(c) for c in g.criteria] for g in workspace._groups.values() if g.criteria}
     side["extras"] = extras or {}
     sidecar_path(path).write_text(json.dumps(side, indent=1, default=str))
     return path

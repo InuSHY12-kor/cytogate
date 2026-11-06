@@ -22,6 +22,23 @@ class AnalyzedSample:
     def name(self) -> str:
         return self.ps.sample.name
 
+    # --- keywords ---------------------------------------------------------------
+    @property
+    def keywords(self) -> dict[str, str]:
+        """FCS keywords with workspace edits on top."""
+        return {**self.ps.sample.keywords, **self.user_keywords}
+
+    def keyword(self, name: str, default: str = "") -> str:
+        """Keyword value; FCS standard keywords may be given with or without "$"."""
+        kw = self.keywords
+        if name in kw:
+            return kw[name]
+        want = name.upper().lstrip("$")
+        for k, v in kw.items():
+            if k.upper().lstrip("$") == want:
+                return v
+        return default
+
     def invalidate(self) -> None:
         """Call after changing gates or transforms."""
         self._masks = None
