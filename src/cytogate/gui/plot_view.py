@@ -2,18 +2,51 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..core import ProcessedSample, Transform, axis_ticks
+from ..core import EllipseGate, PolygonGate, ProcessedSample, RectangleGate, Transform, axis_ticks
 from ..plots import HistogramY, PlotType, histogram, render_2d
+from .gate_tools import GateViewBox, ellipse_outline
 
 pg.setConfigOptions(antialias=True, background="w", foreground="k", imageAxisOrder="col-major")
 
 CONTOUR_PEN = pg.mkPen((0, 0, 0), width=1)
 HIST_PEN = pg.mkPen((0, 0, 0), width=1.2)
 HIST_BRUSH = pg.mkBrush(120, 120, 120, 110)
+GATE_PEN = pg.mkPen((0, 0, 0), width=1.5)
+
+
+def gate_outline(gate, ps: ProcessedSample, x: str, y: str | None) -> np.ndarray | None:
+    """Gate shape in display units for a plot of x (and y), or None if it is on other axes."""
+    px = ps.parameter(x).name
+    py = ps.parameter(y).name if y else None
+    dims = tuple(ps.parameter(d).name for d in gate.dims)
+    if isinstance(gate, RectangleGate):
+        def edge(d, v, lo):
+            if v is None:
+                return 0.0 if lo else 1.0
+            return float(np.clip(ps.transforms[d].apply(np.array([v]))[0], 0, 1))
+        if py is None and dims == (px,):
+            x0, x1 = edge(px, gate.mins[0], True), edge(px, gate.maxs[0], False)
+            return np.array([[x0, 0], [x0, 1], [x0, 0.5], [x1, 0.5], [x1, 1], [x1, 0]])
+        if py is not None and set(dims) == {px, py}:
+            ix, iy = dims.index(px), dims.index(py)
+            x0, x1 = edge(px, gate.mins[ix], True), edge(px, gate.maxs[ix], False)
+            y0, y1 = edge(py, gate.mins[iy], True), edge(py, gate.maxs[iy], False)
+            return np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]])
+        return None
+    if py is None or len(dims) != 2:
+        return None
+    if isinstance(gate, PolygonGate) and dims == (px, py):
+        v = gate.display_vertices(ps)
+        return np.vstack([v, v[:1]])
+    if isinstance(gate, EllipseGate) and dims == (px, py):
+        return ellipse_outline(gate.center, gate.a, gate.b, gate.angle)
+    return None
 
 
 def _set_axis(axis: pg.AxisItem, xf: Transform) -> None:
@@ -45,7 +78,8 @@ class PlotView(QtWidgets.QWidget):
         super().__init__(parent)
         self.title = QtWidgets.QLabel(alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
         self.title.setStyleSheet("font-size: 12px;")
-        self.plot = pg.PlotWidget()
+        self.viewbox = GateViewBox()
+        self.plot = pg.PlotWidget(viewBox=self.viewbox)
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(False, False)
         self.plot.hideButtons()
@@ -63,12 +97,51 @@ class PlotView(QtWidgets.QWidget):
         layout.addWidget(self.title)
         layout.addWidget(self.plot, 1)
         self.last_render = None
+        self.gate_items: list = []
 
     def clear(self) -> None:
         self.image.clear()
         self.contours.clear()
         self.hist.clear()
         self.title.setText("")
+        self.clear_gates()
+
+    def clear_gates(self) -> None:
+        for item in self.gate_items:
+            self.plot.removeItem(item)
+        self.gate_items = []
+
+    def show_gates(self, ps: ProcessedSample, x: str, y: str | None, gates) -> list[str]:
+        """Outline child gates that use these axes. `gates` = [(name, gate, freq %)].
+        Returns the names drawn."""
+        self.clear_gates()
+        drawn = []
+        top = self.plot.getViewBox().viewRange()[1][1] if y is None else 1.0
+        for name, gate, freq in gates:
+            pts = gate_outline(gate, ps, x, y)
+            if pts is None:
+                continue
+            if y is None:
+                pts = pts * np.array([1.0, top * 0.95])
+            curve = pg.PlotCurveItem(pts[:, 0], pts[:, 1], pen=GATE_PEN)
+            quad = re.match(r"^(Q[1-4]):", name)
+            if quad and y is not None:
+                # FlowJo puts quadrant numbers in the outer corners
+                corner = {"Q1": (0, 1), "Q2": (1, 1), "Q3": (1, 0), "Q4": (0, 0)}[quad.group(1)]
+                label = pg.TextItem(f"{quad.group(1)}\n{freq:.3g}", color=(0, 0, 0),
+                                    anchor=(corner[0], 1 - corner[1]))
+                label.setPos(0.01 + 0.98 * corner[0], 0.01 + 0.98 * corner[1])
+            else:
+                label = pg.TextItem(f"{name}\n{freq:.3g}", color=(0, 0, 0), anchor=(0.5, 0.5))
+                cx = float(np.clip((pts[:, 0].min() + pts[:, 0].max()) / 2, 0.05, 0.95))
+                cy = float((pts[:, 1].min() + pts[:, 1].max()) / 2)
+                label.setPos(cx, cy if y is None else float(np.clip(cy, 0.05, 0.95)))
+            for item in (curve, label):
+                item.setZValue(20)
+                self.plot.addItem(item, ignoreBounds=True)
+                self.gate_items.append(item)
+            drawn.append(name)
+        return drawn
 
     def show_sample(
         self,

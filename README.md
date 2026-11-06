@@ -10,7 +10,7 @@
 
 진행 계획은 [ROADMAP.md](ROADMAP.md)를 보세요.
 
-![메인 화면](docs/images/main_window.png)
+![메인 화면](docs/images/gating_quadrants.png)
 
 ## 실행 (Windows)
 

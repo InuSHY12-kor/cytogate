@@ -49,6 +49,34 @@ def main() -> None:
     win.grab().save(str(OUT / "main_window.png"))
     print("saved main_window")
 
+    # gating example: lymphocytes -> CD3+ -> CD4/CD8 quadrants
+    names = iter(["Lymphocytes", "CD3+"])
+    win.ask_gate_name = lambda default: next(names)
+    e01 = FCS.name
+    win.select(e01)
+    win.x_box.setCurrentIndex(win.x_box.findData("FSC-A"))
+    win.y_box.setCurrentIndex(win.y_box.findData("SSC-A"))
+    win.shape_drawn("Polygon", [(0.3, 0.06), (0.62, 0.06), (0.8, 0.13), (0.62, 0.3), (0.35, 0.3), (0.27, 0.16)])
+    win.select(e01, ("Lymphocytes",))
+    win.x_box.setCurrentIndex(win.x_box.findData("Comp-CD3 APC-H7 FLR-A"))
+    win.y_box.setCurrentIndex(win.y_box.findData("SSC-A"))
+    ps_e01 = win.samples[e01].ps
+    pos = lambda name, v: float(ps_e01.transforms[name].apply([v])[0])  # noqa: E731
+    win.shape_drawn("Rectangle", [(pos("Comp-CD3 APC-H7 FLR-A", 600), 0.0), (1.0, 0.4)])
+    win.select(e01, ("Lymphocytes", "CD3+"))
+    win.x_box.setCurrentIndex(win.x_box.findData("Comp-CD4 PE-Cy7 FLR-A"))
+    win.y_box.setCurrentIndex(win.y_box.findData("Comp-CD8 PerCP-Cy55 FLR-A"))
+    win.shape_drawn("Quadrant", [(pos("Comp-CD4 PE-Cy7 FLR-A", 1000), pos("Comp-CD8 PerCP-Cy55 FLR-A", 2000))])
+    app.processEvents()
+    win.grab().save(str(OUT / "gating_quadrants.png"))
+    print("saved gating_quadrants")
+    win.select(e01, ("Lymphocytes",))
+    win.x_box.setCurrentIndex(win.x_box.findData("Comp-CD3 APC-H7 FLR-A"))
+    win.y_box.setCurrentIndex(win.y_box.findData("SSC-A"))
+    app.processEvents()
+    win.grab().save(str(OUT / "gating.png"))
+    print("saved gating")
+
 
 if __name__ == "__main__":
     main()

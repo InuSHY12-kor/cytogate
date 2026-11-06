@@ -13,7 +13,7 @@
 | 1. FCS 읽기 | FCS 2.0/3.0/3.1, 키워드, 채널(PnN/PnS), 이벤트 행렬 | 샘플 파일의 채널·이벤트 수 일치 | ✅ |
 | 2. 보정·변환 | `$SPILLOVER` 보정, Linear / Log / Biex / Logicle / Arcsinh | FlowJo 변환 참조값과 일치 | ✅ |
 | 3. 그래프 | Dot, Pseudocolor, Contour, Density, Histogram | 스크린샷 확인 | ✅ |
-| 4. 게이팅 | Polygon, Rectangle, Ellipse, Quadrant, Range, Boolean, 게이트 트리 | `.wsp` 게이트 이벤트 수 일치 | ⬜ |
+| 4. 게이팅 | Polygon, Rectangle, Ellipse, Quadrant, Range, Boolean, 게이트 트리 | `.wsp` 게이트 이벤트 수 일치 | ✅ (FlowJo 9 변환 파일 예외, 아래 참고) |
 | 5. 통계 | Count, Freq. of Parent/Total/Grandparent, Median, Mean, Geo. Mean, CV, SD, rCV | FlowJo 계산식과 일치 | ⬜ |
 | 6. 그룹·일괄 적용 | 그룹, 게이트 일괄 적용, 샘플별 조정 | 여러 파일 일괄 처리 | ⬜ |
 | 7. 출력 | Table Editor 형식 CSV/XLSX, `.wsp` 내보내기/불러오기, 그래프 PNG/SVG/PDF, 게이트 이벤트 FCS 내보내기 | FlowJo에서 `.wsp` 열기 | ⬜ |
@@ -46,6 +46,14 @@
 - 축 범위를 벗어난 이벤트는 FlowJo처럼 축 가장자리에 쌓아 표시
 - 계산부(`cytogate.plots`)는 화면 없이 테스트, 화면은 offscreen으로 테스트·스크린샷(`scripts/screenshots.py`)
 
-### 4단계에서 처리할 것
-- E01 샘플 Time 게이트(1.28–180.48 s): FlowJo 290,172개, 경계값 그대로 계산하면 290,166개(6개 차이).
-  추정 원인: FlowJo가 축 끝에 닿은 게이트를 바깥쪽으로 열린 범위로 취급함. 4단계에서 확인한다.
+### 4단계 (게이팅)
+- 게이트: Rectangle, Range(히스토그램), Polygon, Ellipse, Quadrant(Q1–Q4), Boolean(AND/OR/NOT), 게이트 바깥(eventsInside="0")
+- FlowJo처럼 표시 공간(변환 후)에서 판정. 축 끝에 그린 게이트는 그 방향으로 열린 범위
+- 화면: 게이트 도구 모음, 마우스로 그리기, 왼쪽 트리에 Freq. of Parent(%)·#Cells, 그래프 위 게이트 윤곽과 비율, 게이트 삭제
+- `.wsp` 읽기(게이트·보정·변환·FlowJo가 저장한 수치)를 이번 단계에서 먼저 구현 — 7단계에서 쓰기 추가
+- Time: FlowJo는 `$TIMESTEP`이 아니라 샘플별 gain = (`$ETIM` − `$BTIM`) ÷ 저장된 Time 값 범위를 쓴다. `.wsp`에 기록된 gain과 일치, Time 게이트 수치 3개 샘플 모두 일치
+
+#### FlowJo 수치 비교 결과
+- FlowJo 10에서 만든 작업공간(사분면+자식 게이트, Biex, ArcSinh, 타원 등 6개 파일): **모든 게이트 수치 정확히 일치**
+- FlowJo 9에서 변환된 "DEN" 작업공간: Time은 일치, Singlets 이하에서 Polygon/Rectangle 최대 약 0.3%, Logicle 축의 타원 최대 약 3.2% 차이.
+  원인 미확정(FlowKit도 같은 차이). FlowJo의 Logicle 표시 변환이 공식과 다를 가능성이 가장 큼. 8단계에서 FlowJo 10으로 직접 만든 Logicle 작업공간으로 다시 확인 필요
