@@ -19,6 +19,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..core import ProcessedSample
 from ..core.analysis import AnalyzedSample
 from ..core.history import History
+from ..core.presets import apply_presets
 from ..core.stats import Stat, StatSpec
 from ..core.workspace import ALL_SAMPLES, ApplyResult, Criterion, Workspace
 from ..io import FcsReadError, load_fcs
@@ -235,6 +236,12 @@ class MainWindow(QtWidgets.QMainWindow):
         k.addAction("Paste Keywords from Spreadsheet", lambda: self.paste_keywords(QtWidgets.QApplication.clipboard().text()))
         k.addSeparator()
         k.addAction("Show Keyword Columns…", self.keyword_columns_dialog)
+        c = self.menuBar().addMenu("Compensation")
+        c.addAction("Compensation Matrix Editor…", self.compensation_dialog)
+        c.addAction("Remove Compensation (selected samples)",
+                    lambda: self.apply_compensation(None, self.selected_sample_names()))
+        c.addSeparator()
+        c.addAction("Copy Transforms to Current Group", self.copy_transforms_to_group)
         k.addAction("Sample Properties…", self.sample_properties)
 
     # --- saving / opening ----------------------------------------------------------------
@@ -364,6 +371,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for f in files:
                 try:
                     a = AnalyzedSample(ProcessedSample(load_fcs(f)))
+                    apply_presets(a.ps)  # saved transform presets
                 except (FcsReadError, KeyError, ValueError) as exc:
                     errors.append(f"{f.name}: {exc}")
                     continue
@@ -546,6 +554,45 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.keywords_changed.connect(lambda changes: [self.set_keyword([name], k, v) for k, v in changes.items()])
         dlg.show()
         return dlg
+
+    # --- compensation and transforms -----------------------------------------------------
+    def compensation_dialog(self, show: bool = True):
+        a, _ = self.selection()
+        if a is None:
+            return None
+        from .compensation_dialog import CompensationDialog
+        dlg = CompensationDialog(self, a.name, self)
+        if show:
+            dlg.show()
+        return dlg
+
+    def apply_compensation(self, comp, targets) -> list[str]:
+        """Apply a matrix (None = remove compensation) to samples."""
+        targets = list(targets)
+        if not targets:
+            return []
+        self.record()
+        done, skipped = self.ws.apply_compensation(comp, targets)
+        if skipped:
+            QtWidgets.QMessageBox.warning(self, "Compensation", "Not applied to:\n" +
+                                          "\n".join(f"{k}: {v}" for k, v in skipped.items()))
+        self.data_changed(done)
+        for g in self.graphs:  # parameter lists change with the matrix
+            if g.sample_name in done:
+                g.show_population(g.sample_name, g.path)
+        self.statusBar().showMessage(
+            f"{'Removed compensation from' if comp is None else 'Applied ' + comp.name + ' to'} {len(done)} sample(s)")
+        return done
+
+    def copy_transforms_to_group(self, source: str | None = None) -> list[str]:
+        source = source or (self.selection()[0].name if self.selection()[0] else None)
+        if source is None:
+            return []
+        self.record()
+        done = self.ws.copy_transforms(source, self.ws.group(self.current_group()).samples)
+        self.data_changed(done)
+        self.statusBar().showMessage(f"Copied transforms from {source} to {len(done)} sample(s)")
+        return done
 
     # --- renaming ------------------------------------------------------------------------------
     def ask_text(self, title: str, label: str, default: str = "") -> str | None:

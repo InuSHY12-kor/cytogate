@@ -201,6 +201,37 @@ class Workspace:
             a.invalidate()
         return targets
 
+    def copy_transforms(self, source: str, targets, parameters=None) -> list[str]:
+        """FlowJo's CopyTransforms: give other samples the source's axis transforms."""
+        src = self.samples[source].ps.transforms
+        done = []
+        for n in targets:
+            if n == source:
+                continue
+            a = self.samples[n]
+            names = {p.name for p in a.ps.parameters}
+            for k, xf in src.items():
+                if k in names and (parameters is None or k in parameters):
+                    a.ps.transforms[k] = xf
+            a.invalidate()
+            done.append(n)
+        return done
+
+    def apply_compensation(self, comp, targets) -> tuple[list[str], dict[str, str]]:
+        """Apply a matrix (None = remove) to samples. Samples lacking one of its
+        detectors are skipped. Returns (changed, {skipped: reason})."""
+        done, skipped = [], {}
+        for n in targets:
+            a = self.samples[n]
+            if comp is not None:
+                missing = [d for d in comp.detectors if d not in {c.pnn for c in a.ps.sample.channels}]
+                if missing:
+                    skipped[n] = f"no detector {', '.join(missing)}"
+                    continue
+            a.set_compensation(comp)
+            done.append(n)
+        return done, skipped
+
     def copy_statistic(self, spec, path, targets) -> list[str]:
         """Add a statistic to population `path` of each target sample that has it."""
         done = []

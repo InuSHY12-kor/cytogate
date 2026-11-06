@@ -39,6 +39,17 @@ class AnalyzedSample:
                 return v
         return default
 
+    def set_compensation(self, comp) -> None:
+        """Apply a compensation matrix (None removes it). Transforms of parameters
+        that still exist are kept; gates on Comp- parameters keep working when
+        the new matrix covers the same detectors."""
+        from .processing import ProcessedSample
+        keep = dict(self.ps.transforms)
+        self.ps = ProcessedSample(self.ps.sample, compensation=comp,
+                                  transforms={k: v for k, v in keep.items()
+                                              if k in {p.name for p in ProcessedSample.parameter_names(self.ps.sample, comp)}})
+        self.invalidate()
+
     def invalidate(self) -> None:
         """Call after changing gates or transforms."""
         self._masks = None
