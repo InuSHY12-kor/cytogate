@@ -1,8 +1,15 @@
-"""Graph widget: one sample, one or two parameters, FlowJo-style axes."""
+"""Graph widget: one sample, one or two parameters, FlowJo-style axes.
+
+Besides drawing, it handles the gate interactions of FlowJo's graph window:
+click a gate to make it the active gate (outlined in red, with handles on its
+vertices or corners), drag inside it to move it, drag a handle to reshape it,
+drag its label anywhere.
+"""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
@@ -18,6 +25,25 @@ CONTOUR_PEN = pg.mkPen((0, 0, 0), width=1)
 HIST_PEN = pg.mkPen((0, 0, 0), width=1.2)
 HIST_BRUSH = pg.mkBrush(120, 120, 120, 110)
 GATE_PEN = pg.mkPen((0, 0, 0), width=1.5)
+ACTIVE_PEN = pg.mkPen((220, 0, 0), width=2.2)
+MEDIAN_PEN = pg.mkPen((220, 0, 0), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
+IMAGE_FORMATS = {"png": "PNG image (*.png)", "jpg": "JPEG image (*.jpg)", "svg": "SVG vector image (*.svg)",
+                 "pdf": "PDF document (*.pdf)", "bmp": "Bitmap (*.bmp)", "tif": "TIFF image (*.tif)"}
+
+
+@dataclass
+class DisplayOptions:
+    """FlowJo graph window "Display" menu and "Options" panel settings."""
+
+    show_grid: bool = False
+    large_dots: bool = False
+    show_gate_names: bool = True
+    show_gate_freqs: bool = True
+    show_medians: bool = False
+    smooth: bool = False  # histograms
+    show_outliers: bool = True  # contour plots
+    foreground: tuple = (0, 0, 0)  # dots / outliers / histogram line
+    background: tuple = (255, 255, 255)
 
 
 def gate_outline(gate, ps: ProcessedSample, x: str, y: str | None) -> np.ndarray | None:
@@ -49,6 +75,20 @@ def gate_outline(gate, ps: ProcessedSample, x: str, y: str | None) -> np.ndarray
     return None
 
 
+def gate_handles(gate, ps: ProcessedSample, x: str, y: str | None) -> np.ndarray | None:
+    """Points the user can drag to reshape a gate (display units), or None."""
+    pts = gate_outline(gate, ps, x, y)
+    if pts is None:
+        return None
+    if isinstance(gate, PolygonGate):
+        return pts[:-1]
+    if isinstance(gate, RectangleGate):
+        if y is None:
+            return np.array([[pts[0, 0], 0.5], [pts[3, 0], 0.5]])
+        return pts[:4]
+    return None
+
+
 def _set_axis(axis: pg.AxisItem, xf: Transform) -> None:
     ticks = axis_ticks(xf)
     axis.setTicks([
@@ -72,30 +112,51 @@ def _contour_paths(dens: np.ndarray, levels: np.ndarray) -> tuple[np.ndarray, np
 
 
 class GateShape(pg.PlotCurveItem):
-    """Gate outline. When movable, dragging anywhere inside it moves the gate
-    (only while no gate tool is active); `on_moved(dx, dy)` gets the shift in
+    """Gate outline. Click to select; when movable, drag inside to move it
+    (only while no gate tool is active). `on_moved(dx, dy)` gets the shift in
     display units."""
 
-    def __init__(self, pts, viewbox, y_scale, on_moved):
-        super().__init__(pts[:, 0], pts[:, 1], pen=GATE_PEN)
+    def __init__(self, pts, viewbox, y_scale, on_moved, on_click=None, active=False, tint=None):
+        super().__init__(pts[:, 0], pts[:, 1], pen=ACTIVE_PEN if active else GATE_PEN)
         self.vb = viewbox
         self.y_scale = y_scale
         self.on_moved = on_moved
+        self.on_click = on_click
+        self.active = active
         path = QtGui.QPainterPath()
         path.addPolygon(QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in pts]))
         path.closeSubpath()
         self._area = path
+        self._tint = None
+        if tint:
+            c = QtGui.QColor(tint)
+            c.setAlpha(70)
+            self._tint = c
         if on_moved:
             self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
 
-    def _movable(self) -> bool:
-        return self.on_moved is not None and self.vb.tool is None
+    def _free(self) -> bool:
+        return self.vb.tool is None
 
     def shape(self):
-        return self._area if self.on_moved is not None else super().shape()
+        return self._area if (self.on_moved is not None or self.on_click is not None) else super().shape()
+
+    def paint(self, p, *args):
+        if self._tint is not None:  # FlowJo "Tint": fill the gate area
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(self._tint)
+            p.drawPath(self._area)
+        super().paint(p, *args)
+
+    def mouseClickEvent(self, ev):
+        if ev.button() == QtCore.Qt.MouseButton.LeftButton and self._free() and self.on_click:
+            ev.accept()
+            self.on_click()
+        else:
+            ev.ignore()
 
     def mouseDragEvent(self, ev):
-        if ev.button() != QtCore.Qt.MouseButton.LeftButton or not self._movable():
+        if ev.button() != QtCore.Qt.MouseButton.LeftButton or self.on_moved is None or not self._free():
             ev.ignore()
             return
         ev.accept()
@@ -106,6 +167,40 @@ class GateShape(pg.PlotCurveItem):
         if ev.isFinish():
             self.setPos(0, 0)
             self.on_moved(float(dx), float(dy / self.y_scale))
+
+
+class GateHandle(pg.GraphicsObject):
+    """Small square on a vertex/corner of the active gate; drag it to reshape."""
+
+    SIZE = 7
+
+    def __init__(self, index: int, pos, viewbox, y_scale, on_moved):
+        super().__init__()
+        self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        self.index, self.vb, self.y_scale, self.on_moved = index, viewbox, y_scale, on_moved
+        self.setPos(float(pos[0]), float(pos[1] * y_scale))
+        self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+        self.setZValue(25)
+
+    def boundingRect(self):
+        s = self.SIZE
+        return QtCore.QRectF(-s, -s, 2 * s, 2 * s)
+
+    def paint(self, p, *args):
+        s = self.SIZE / 2 + 1
+        p.setPen(pg.mkPen((0, 0, 0)))
+        p.setBrush(pg.mkBrush((0, 0, 0)))
+        p.drawRect(QtCore.QRectF(-s, -s, 2 * s, 2 * s))
+
+    def mouseDragEvent(self, ev):
+        if ev.button() != QtCore.Qt.MouseButton.LeftButton or self.vb.tool is not None:
+            ev.ignore()
+            return
+        ev.accept()
+        p = self.vb.mapSceneToView(ev.scenePos())
+        self.setPos(p)
+        if ev.isFinish():
+            self.on_moved(self.index, (float(np.clip(p.x(), 0, 1)), float(np.clip(p.y() / self.y_scale, 0, 1))))
 
 
 class GateLabel(pg.TextItem):
@@ -174,6 +269,7 @@ class PlotView(QtWidgets.QWidget):
         self.image = pg.ImageItem()
         self.contours = pg.PlotCurveItem(pen=CONTOUR_PEN, connect="finite")
         self.hist = pg.PlotCurveItem(pen=HIST_PEN, brush=HIST_BRUSH, fillLevel=0)
+        self.median_items: list = []
         for item in (self.image, self.contours, self.hist):
             self.plot.addItem(item)
         layout = QtWidgets.QVBoxLayout(self)
@@ -182,12 +278,17 @@ class PlotView(QtWidgets.QWidget):
         layout.addWidget(self.plot, 1)
         self.last_render = None
         self.gate_items: list = []
+        self.options = DisplayOptions()
+        self.y_top = 1.0  # view units of the top of the y axis (counts for histograms)
 
     def clear(self) -> None:
         self.image.clear()
         self.contours.clear()
         self.hist.clear()
         self.title.setText("")
+        for item in self.median_items:
+            self.plot.removeItem(item)
+        self.median_items = []
         self.clear_gates()
 
     def clear_gates(self) -> None:
@@ -196,18 +297,23 @@ class PlotView(QtWidgets.QWidget):
         self.gate_items = []
 
     def show_gates(self, ps: ProcessedSample, x: str, y: str | None, gates, on_label_moved=None,
-                   on_gate_moved=None) -> list[str]:
+                   on_gate_moved=None, active=None, on_select=None, on_vertex_moved=None) -> list[str]:
         """Outline child gates that use these axes.
 
-        `gates` = [(name, gate, freq %, label offset, key)]. Labels can be dragged
-        with the mouse (when no gate tool is active); `on_label_moved(key, offset)`
-        is called with the new offset. Gates other than quadrants can be dragged
-        too: `on_gate_moved(key, dx, dy)` (display units). Returns the names drawn.
+        `gates` = [(name, gate, freq %, label offset, key)] or with a 6th item,
+        the tint colour. Labels can be dragged (when no gate tool is active):
+        `on_label_moved(key, offset)`. Gates other than quadrants can be dragged:
+        `on_gate_moved(key, dx, dy)` (display units). Clicking a gate calls
+        `on_select(key)`; the gate whose key is `active` gets handles, which call
+        `on_vertex_moved(key, index, (x, y))`. Returns the names drawn.
         """
         self.clear_gates()
         drawn = []
-        top = self.plot.getViewBox().viewRange()[1][1] if y is None else 1.0
-        for name, gate, freq, offset, key in gates:
+        top = self.y_top if y is None else 1.0
+        opts = self.options
+        for entry in gates:
+            name, gate, freq, offset, key = entry[:5]
+            tint = entry[5] if len(entry) > 5 else None
             pts = gate_outline(gate, ps, x, y)
             if pts is None:
                 continue
@@ -215,25 +321,40 @@ class PlotView(QtWidgets.QWidget):
                 pts = pts * np.array([1.0, top * 0.95])
             quad = re.match(r"^(Q[1-4]):", name)
             movable = on_gate_moved is not None and not quad
+            is_active = active is not None and key == active
             curve = GateShape(pts, self.viewbox, top,
-                              (lambda dx, dy, k=key: on_gate_moved(k, dx, dy)) if movable else None)
+                              (lambda dx, dy, k=key: on_gate_moved(k, dx, dy)) if movable else None,
+                              on_click=(lambda k=key: on_select(k)) if on_select else None,
+                              active=is_active, tint=tint)
+            short = quad.group(1) if quad and y is not None else name
+            text = "\n".join(t for t, show in ((short, opts.show_gate_names), (f"{freq:.3g}", opts.show_gate_freqs)) if show)
             if quad and y is not None:
                 # FlowJo puts quadrant numbers in the outer corners
                 corner = {"Q1": (0, 1), "Q2": (1, 1), "Q3": (1, 0), "Q4": (0, 0)}[quad.group(1)]
-                text, anchor = f"{quad.group(1)}\n{freq:.3g}", (corner[0], 1 - corner[1])
+                anchor = (corner[0], 1 - corner[1])
                 base = (0.01 + 0.98 * corner[0], 0.01 + 0.98 * corner[1])
             else:
-                text, anchor = f"{name}\n{freq:.3g}", (0.5, 0.5)
+                anchor = (0.5, 0.5)
                 cx = float(np.clip((pts[:, 0].min() + pts[:, 0].max()) / 2, 0.05, 0.95))
                 cy = float((pts[:, 1].min() + pts[:, 1].max()) / 2)
                 base = (cx, cy if y is None else float(np.clip(cy, 0.05, 0.95)))
-            label = GateLabel(text, anchor, base, offset, top, self.viewbox,
-                              (lambda off, k=key: on_label_moved(k, off)) if on_label_moved else None)
             curve.setZValue(19)
-            label.setZValue(20)  # labels sit above gate areas so they can be dragged
-            for item in (curve, label):
-                self.plot.addItem(item, ignoreBounds=True)
-                self.gate_items.append(item)
+            self.plot.addItem(curve, ignoreBounds=True)
+            self.gate_items.append(curve)
+            if text:
+                label = GateLabel(text, anchor, base, offset, top, self.viewbox,
+                                  (lambda off, k=key: on_label_moved(k, off)) if on_label_moved else None)
+                label.setZValue(20)  # labels sit above gate areas so they can be dragged
+                self.plot.addItem(label, ignoreBounds=True)
+                self.gate_items.append(label)
+            if is_active and on_vertex_moved is not None and not quad:
+                handles = gate_handles(gate, ps, x, y)
+                if handles is not None:
+                    for i, hp in enumerate(handles):
+                        h = GateHandle(i, hp, self.viewbox, top if y is None else 1.0,
+                                       lambda idx, p, k=key: on_vertex_moved(k, idx, p))
+                        self.plot.addItem(h, ignoreBounds=True)
+                        self.gate_items.append(h)
             drawn.append(name)
         return drawn
 
@@ -242,6 +363,9 @@ class PlotView(QtWidgets.QWidget):
 
     def gate_shapes(self) -> list["GateShape"]:
         return [i for i in self.gate_items if isinstance(i, GateShape)]
+
+    def gate_handles(self) -> list["GateHandle"]:
+        return [i for i in self.gate_items if isinstance(i, GateHandle)]
 
     def show_sample(
         self,
@@ -254,6 +378,9 @@ class PlotView(QtWidgets.QWidget):
         mask: np.ndarray | None = None,
     ) -> None:
         self.clear()
+        opts = self.options
+        self.plot.setBackground(QtGui.QColor(*opts.background))
+        self.plot.showGrid(x=opts.show_grid, y=opts.show_grid, alpha=0.3)
         px = ps.parameter(x)
         xs = ps.scaled(px.name)
         if mask is not None:
@@ -264,37 +391,90 @@ class PlotView(QtWidgets.QWidget):
         self.plot.setLabel("bottom", px.label)
 
         if kind == PlotType.HISTOGRAM or y is None:
-            edges, heights = histogram(xs, y_mode=hist_y)
+            edges, heights = histogram(xs, y_mode=hist_y, smooth=opts.smooth)
+            self.hist.setPen(pg.mkPen(opts.foreground, width=1.2))
             self.hist.setData(edges, heights, stepMode="center")
             top = heights.max() * 1.05 if heights.size and heights.max() > 0 else 1
-            left = self.plot.getAxis("left")
-            left.setTicks(None)
+            self.y_top = float(top)
+            self.plot.getAxis("left").setTicks(None)
             self.plot.setLabel("left", hist_y.value)
             self.plot.setXRange(0, 1, padding=0)
             self.plot.setYRange(0, top, padding=0)
+            if opts.show_medians and xs.size:
+                m = float(np.median(np.clip(xs, 0, 1)))
+                line = pg.InfiniteLine(m, angle=90, pen=MEDIAN_PEN)
+                self.plot.addItem(line, ignoreBounds=True)
+                self.median_items.append(line)
             self.last_render = heights
             return
 
+        self.y_top = 1.0
         py = ps.parameter(y)
         ys = ps.scaled(py.name)
         if mask is not None:
             ys = ys[mask]
-        r = render_2d(xs, ys, kind)
+        r = render_2d(xs, ys, kind, show_outliers=opts.show_outliers, dot_color=tuple(opts.foreground),
+                      large_dots=opts.large_dots)
         self.image.setImage(r.image, autoLevels=False)
         self.image.setRect(QtCore.QRectF(0, 0, 1, 1))
         if kind == PlotType.CONTOUR and r.levels.size:
+            self.contours.setPen(pg.mkPen(opts.foreground, width=1))
             self.contours.setData(*_contour_paths(r.density, r.levels))
         _set_axis(self.plot.getAxis("left"), ps.transforms[py.name])
         _set_axis(self.plot.getAxis("right"), ps.transforms[py.name])
         self.plot.setLabel("left", py.label)
         self.plot.setXRange(0, 1, padding=0)
         self.plot.setYRange(0, 1, padding=0)
+        if opts.show_medians and xs.size:
+            mx, my = float(np.median(np.clip(xs, 0, 1))), float(np.median(np.clip(ys, 0, 1)))
+            for item in (pg.InfiniteLine(mx, angle=90, pen=MEDIAN_PEN), pg.InfiniteLine(my, angle=0, pen=MEDIAN_PEN)):
+                self.plot.addItem(item, ignoreBounds=True)
+                self.median_items.append(item)
         self.last_render = r
 
+    # --- output -------------------------------------------------------------------------
+    def to_image(self, scale: float = 2.0, transparent: bool = False) -> QtGui.QImage:
+        """The graph (title + plot) as an image; optionally with a transparent background."""
+        img = QtGui.QImage(self.size() * scale, QtGui.QImage.Format.Format_ARGB32)
+        img.setDevicePixelRatio(scale)
+        img.fill(QtCore.Qt.GlobalColor.transparent if transparent else QtCore.Qt.GlobalColor.white)
+        if transparent:
+            self.plot.setBackground(None)
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        painter = QtGui.QPainter(img)
+        self.render(painter, QtCore.QPoint(), QtGui.QRegion(), QtWidgets.QWidget.RenderFlag.DrawChildren)
+        painter.end()
+        if transparent:
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, False)
+            self.plot.setBackground(QtGui.QColor(*self.options.background))
+        return img
+
     def export_png(self, path: str, scale: float = 2.0) -> bool:
-        """Save the graph (title + plot) as an image."""
-        pixmap = QtGui.QPixmap(self.size() * scale)
-        pixmap.setDevicePixelRatio(scale)
-        pixmap.fill(QtCore.Qt.GlobalColor.white)
-        self.render(pixmap)
-        return pixmap.save(path)
+        return self.to_image(scale).save(path)
+
+    def export_image(self, path: str) -> bool:
+        """Save as PNG, JPG, BMP, TIFF, SVG or PDF, chosen by the file extension."""
+        ext = path.rsplit(".", 1)[-1].lower()
+        if ext == "svg":
+            from PySide6 import QtSvg
+            gen = QtSvg.QSvgGenerator()
+            gen.setFileName(path)
+            gen.setSize(self.size())
+            gen.setViewBox(QtCore.QRect(QtCore.QPoint(0, 0), self.size()))
+            gen.setTitle(self.title.text().replace("\n", " "))
+            painter = QtGui.QPainter(gen)
+            self.render(painter, QtCore.QPoint())
+            painter.end()
+            return True
+        if ext == "pdf":
+            writer = QtGui.QPdfWriter(path)
+            writer.setPageSize(QtGui.QPageSize(QtCore.QSizeF(self.width(), self.height()), QtGui.QPageSize.Unit.Point))
+            writer.setPageMargins(QtCore.QMarginsF(0, 0, 0, 0))
+            writer.setResolution(72)
+            painter = QtGui.QPainter(writer)
+            self.render(painter, QtCore.QPoint())
+            painter.end()
+            return True
+        if ext in ("png", "jpg", "jpeg", "bmp", "tif", "tiff"):
+            return self.to_image().save(path)
+        raise ValueError(f"unsupported image format: .{ext}")

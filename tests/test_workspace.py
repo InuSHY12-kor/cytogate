@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from cytogate.core import ProcessedSample, RectangleGate
+from cytogate.core import Linear, ProcessedSample, RectangleGate
 from cytogate.core.analysis import AnalyzedSample
 from cytogate.core.gating import EllipseGate, PolygonGate, translate_gate
 from cytogate.core.stats import Stat, StatSpec
@@ -145,3 +145,50 @@ def test_translate_gate(processed):
     assert [v[1] for v in pm.vertices] == pytest.approx([1e4 + 131072, 1e4 + 131072, 2e4 + 131072])
     e = EllipseGate(("FSC-A", "SSC-A"), (0.3, 0.3), 0.1, 0.05, 0.0)
     assert translate_gate(e, ps, {"FSC-A": 0.2}).center == pytest.approx((0.5, 0.3))
+
+
+# --- gate reshaping and undo (graph window support) ----------------------------------------
+
+def test_scale_gate(processed):
+    from cytogate.core.gating import scale_gate
+    ps = processed[E01]
+    e = EllipseGate(("FSC-A", "SSC-A"), (0.3, 0.3), 0.1, 0.05, 0.0)
+    assert scale_gate(e, ps, 1.1).a == pytest.approx(0.11)
+    p = PolygonGate(("FSC-A", "SSC-A"), ((1e4, 1e4), (3e4, 1e4), (2e4, 3e4)))
+    big = scale_gate(p, ps, 2.0)
+    v = np.array(big.vertices)
+    assert v.mean(axis=0) == pytest.approx(np.array(p.vertices).mean(axis=0))
+    assert v[1, 0] - v[0, 0] == pytest.approx(2 * 2e4)
+    r = RectangleGate(("FSC-A",), (1.0,), (2.0,))
+    assert scale_gate(r, ps, 2.0) is r  # FlowJo leaves rectangles alone
+
+
+def test_move_vertex_range(processed):
+    from cytogate.core.gating import move_vertex
+    ps = processed[E01]
+    r = RectangleGate(("FSC-A",), (26214.4,), (131072.0,))
+    m = move_vertex(r, ps, "FSC-A", None, 0, (0.0, 0.5))  # low edge onto the axis: unbounded
+    assert m.mins == (None,) and m.maxs == (131072.0,)
+    m = move_vertex(r, ps, "FSC-A", None, 1, (0.05, 0.5))  # dragged past the other edge
+    assert m.mins[0] < m.maxs[0]
+
+
+def test_history(ws):
+    from cytogate.core.history import History
+    h = History(ws)
+    assert not h.can_undo
+    h.record()
+    lymph_tree(ws.samples[E01])
+    ws.samples[E01].ps.set_transform("FSC-A", Linear(0, 1000))
+    h.record()
+    ws.create_group("G", [E01])
+    assert h.undo() and "G" not in ws.groups
+    h.undo()
+    assert ws.samples[E01].gates.paths() == []
+    assert ws.samples[E01].ps.transforms["FSC-A"] == Linear(0, 262144)
+    assert h.can_redo
+    h.redo()
+    assert ws.samples[E01].gates.paths() == [("Lymphocytes",), ("Lymphocytes", "CD3+")]
+    assert ws.samples[E01].ps.transforms["FSC-A"] == Linear(0, 1000)
+    h.record()
+    assert not h.can_redo  # a new change drops the redo steps

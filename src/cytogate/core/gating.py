@@ -24,7 +24,7 @@ import numpy as np
 
 __all__ = [
     "Gate", "RectangleGate", "PolygonGate", "EllipseGate", "BooleanGate",
-    "Population", "GatingTree", "quadrant_gates", "translate_gate", "EDGE",
+    "Population", "GatingTree", "quadrant_gates", "translate_gate", "scale_gate", "move_vertex", "EDGE",
 ]
 
 # A boundary this close to an axis edge (in display units) counts as being on
@@ -233,6 +233,66 @@ def translate_gate(gate: Gate, ps, deltas: dict[str, float]) -> Gate:
     raise TypeError(f"{type(gate).__name__} cannot be moved")
 
 
+def scale_gate(gate: Gate, ps, factor: float) -> Gate:
+    """Grow (factor > 1) or shrink a gate about its centre, in display space
+    (FlowJo's Active Gate "+" / "-"). Rectangles and ranges are left as they are."""
+    import dataclasses
+
+    if isinstance(gate, EllipseGate):
+        return dataclasses.replace(gate, a=gate.a * factor, b=gate.b * factor)
+    if isinstance(gate, PolygonGate):
+        names = [ps.parameter(d).name for d in gate.dims]
+        xfx, xfy = (ps.transforms[n] for n in names)
+        v = gate.display_vertices(ps)
+        c = v.mean(axis=0)
+        nv = c + (v - c) * factor
+        return dataclasses.replace(gate, vertices=tuple(
+            (float(xfx.inverse(np.array([px]))[0]), float(xfy.inverse(np.array([py]))[0])) for px, py in nv))
+    return gate
+
+
+def move_vertex(gate: Gate, ps, x: str, y: str | None, index: int, pos: tuple[float, float]) -> Gate:
+    """Gate with one handle dragged to `pos` (display units) on a plot of x / y.
+
+    Polygons: vertex `index`. Rectangles: corner `index` (0 = low x/low y,
+    1 = high x/low y, 2 = high x/high y, 3 = low x/high y), the opposite corner
+    stays. Ranges: edge 0 (low) or 1 (high). A side moved onto the axis edge
+    becomes unbounded.
+    """
+    import dataclasses
+
+    px = ps.parameter(x).name
+    xfx = ps.transforms[px]
+    to_x = lambda v: float(xfx.inverse(np.array([v]))[0])  # noqa: E731
+    if isinstance(gate, PolygonGate):
+        py = ps.parameter(y).name
+        to_y = lambda v: float(ps.transforms[py].inverse(np.array([v]))[0])  # noqa: E731
+        verts = list(gate.vertices)
+        verts[index] = (to_x(pos[0]), to_y(pos[1]))
+        return dataclasses.replace(gate, vertices=tuple(verts))
+    if isinstance(gate, RectangleGate):
+        dims = [ps.parameter(d).name for d in gate.dims]
+        mins, maxs = list(gate.mins), list(gate.maxs)
+
+        def put(dim_i: int, xf, value: float, low: bool):
+            v = None if (value <= EDGE if low else value >= 1 - EDGE) else float(xf.inverse(np.array([value]))[0])
+            (mins if low else maxs)[dim_i] = v
+
+        if y is None:
+            put(dims.index(px), xfx, pos[0], low=index == 0)
+        else:
+            py = ps.parameter(y).name
+            ix, iy = dims.index(px), dims.index(py)
+            put(ix, xfx, pos[0], low=index in (0, 3))
+            put(iy, ps.transforms[py], pos[1], low=index in (0, 1))
+        # keep min <= max if a corner was dragged past the opposite one
+        for i in range(len(dims)):
+            if mins[i] is not None and maxs[i] is not None and mins[i] > maxs[i]:
+                mins[i], maxs[i] = maxs[i], mins[i]
+        return dataclasses.replace(gate, mins=tuple(mins), maxs=tuple(maxs))
+    raise TypeError(f"{type(gate).__name__} has no vertices to move")
+
+
 def quadrant_gates(x: str, y: str, x_split: float, y_split: float, x_name: str = "", y_name: str = ""):
     """FlowJo-style quadrants as four (name, RectangleGate) pairs: Q1 top-left, then clockwise."""
     xn, yn = x_name or x, y_name or y
@@ -257,6 +317,7 @@ class Population:
     # Name of the group this gate was applied from (FlowJo "owningGroup").
     # None = the gate belongs to this sample only.
     owning_group: str | None = None
+    tint: str | None = None  # FlowJo "Tint": fill colour of the gate on plots, e.g. "#ff0000"
 
     @property
     def path(self) -> tuple[str, ...]:

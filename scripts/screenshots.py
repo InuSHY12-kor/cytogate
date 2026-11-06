@@ -89,6 +89,19 @@ def main() -> None:
     a.gates.get(("Lymphocytes", "CD3+")).label_offset = (0.05, 0.3)
     win.data_changed([E01])
     side_by_side(app, [win, g2, g3], "gating")
+
+    # graph window with its bottom panels open and the CD3+ gate selected
+    g2.resize(620, 900)
+    for panel in (g2.options_panel, g2.gate_panel, g2.stats_panel):
+        panel.button.setChecked(True)
+    g2.select_gate((E01, ("Lymphocytes", "CD3+")))
+    app.processEvents()
+    g2.grab().save(str(OUT / "graph_window.png"))
+    print("saved graph_window")
+    for panel in (g2.options_panel, g2.gate_panel, g2.stats_panel):
+        panel.button.setChecked(False)
+    g2.active = None
+    g2.resize(500, 600)
     g3.grab().save(str(OUT / "gating_quadrants.png"))
 
     # copy the whole tree to every sample (as dropping it on "All Samples"), then ▶ ▶ to E05

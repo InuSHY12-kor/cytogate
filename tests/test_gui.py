@@ -35,13 +35,26 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+def release(w):
+    """Close a workspace window and free its sample data (each holds ~160 MB)."""
+    import gc
+    w.close_all_graphs()
+    w.close()
+    w.ws.samples.clear()
+    w.history._undo.clear()
+    w.history._redo.clear()
+    w.deleteLater()
+    QtWidgets.QApplication.processEvents()
+    gc.collect()
+
+
 @pytest.fixture
 def win(app, data_dir):
     w = MainWindow()
     w.show()
     w.add_samples([data_dir / FOLDER])
     yield w
-    w.close()
+    release(w)
 
 
 @pytest.fixture
@@ -49,7 +62,9 @@ def g(win, monkeypatch):
     """Graph window for E01 (ungated), FSC-A x SSC-A, gate names auto-accepted."""
     from cytogate.gui.graph_window import GraphWindow
 
-    monkeypatch.setattr(GraphWindow, "ask_gate_name", lambda self, default: default)
+    # name new gates after their tool ("Rectangle", "Rectangle 2", …) to keep tests readable
+    monkeypatch.setattr(GraphWindow, "ask_gate_name",
+                        lambda self, default: self.analysis.unique_name(self.path, self.last_tool))
     gw = win.open_graph(E01)
     gw.resize(560, 660)
     QtWidgets.QApplication.processEvents()

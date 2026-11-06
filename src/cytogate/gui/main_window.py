@@ -18,6 +18,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core import ProcessedSample
 from ..core.analysis import AnalyzedSample
+from ..core.history import History
 from ..core.workspace import ALL_SAMPLES, ApplyResult, Workspace
 from ..io import FcsReadError, load_fcs
 from .graph_window import GraphWindow
@@ -119,9 +120,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ws = Workspace()
         self.samples: dict[str, AnalyzedSample] = self.ws.samples  # same dict
         self.graphs: list[GraphWindow] = []
+        self.history = History(self.ws)
 
         bar = self.addToolBar("Workspace")
         bar.setMovable(False)
+        self.undo_action = bar.addAction("↶ Undo", self.undo)
+        self.undo_action.setShortcut(QtGui.QKeySequence("Ctrl+Z"))
+        self.redo_action = bar.addAction("↷ Redo", self.redo)
+        self.redo_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+Z"))
+        bar.addSeparator()
         bar.addAction("Add Samples…", self.add_samples_dialog)
         bar.addAction("Add Folder…", self.add_folder_dialog)
         bar.addSeparator()
@@ -148,6 +155,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Add samples, then double-click a sample or gate to open a graph.")
         self.setAcceptDrops(True)
         self.refresh_groups()
+        self._sync_undo()
 
     # --- samples ----------------------------------------------------------
     def add_samples(self, paths) -> list[str]:
@@ -193,13 +201,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_samples([u.toLocalFile() for u in e.mimeData().urls()])
 
     # --- graph windows ----------------------------------------------------------
-    def open_graph(self, sample: str, path=()) -> GraphWindow:
-        """Open (or bring forward) a graph window for a population."""
+    def open_graph(self, sample: str, path=(), new: bool = False) -> GraphWindow:
+        """Open (or bring forward) a graph window for a population.
+        new=True always opens another one (Duplicate View)."""
         path = tuple(path)
         known = self.samples[sample].gates.paths()
         while path and path not in known:
             path = path[:-1]
-        for g in self.graphs:
+        for g in self.graphs if not new else []:
             if g.sample_name == sample and g.path == path:
                 g.show()
                 g.raise_()
@@ -213,6 +222,32 @@ class MainWindow(QtWidgets.QMainWindow):
         g.move(self.geometry().right() + 10 + 24 * n, self.geometry().top() + 24 * n)
         g.show()
         return g
+
+    def close_all_graphs(self) -> None:
+        for g in list(self.graphs):
+            g.close()
+
+    # --- undo / redo ----------------------------------------------------------------------
+    def record(self) -> None:
+        """Remember the state before a change, for Undo."""
+        self.history.record()
+        self._sync_undo()
+
+    def _sync_undo(self) -> None:
+        self.undo_action.setEnabled(self.history.can_undo)
+        self.redo_action.setEnabled(self.history.can_redo)
+
+    def _after_history(self, names) -> list[str]:
+        self.refresh_groups()
+        self.data_changed(names)
+        self._sync_undo()
+        return names
+
+    def undo(self) -> list[str]:
+        return self._after_history(self.history.undo())
+
+    def redo(self) -> list[str]:
+        return self._after_history(self.history.redo())
 
     def open_graph_for_item(self, item) -> GraphWindow | None:
         if item is None:
@@ -229,6 +264,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for g in list(self.graphs):
             if g.sample_name in names:
                 g.refresh()
+        self._sync_undo()
 
     def visible_samples(self) -> list[str]:
         """Samples of the current group, in workspace order (graph window ◀ ▶)."""
@@ -381,6 +417,7 @@ class MainWindow(QtWidgets.QMainWindow):
         name = self.ask_group_name()
         if not name:
             return None
+        self.record()
         try:
             self.ws.create_group(name, members)
         except ValueError as exc:
@@ -393,6 +430,7 @@ class MainWindow(QtWidgets.QMainWindow):
         name = self.current_group()
         if name == ALL_SAMPLES:
             return
+        self.record()
         self.ws.delete_group(name)
         self.refresh_groups(select=ALL_SAMPLES)
         self.data_changed(list(self.samples))
@@ -414,6 +452,7 @@ class MainWindow(QtWidgets.QMainWindow):
         items = [(s, p) for s, p in items if p or self.samples[s].gates.root.children]
         if not items:
             return None
+        self.record()
         result = self.ws.copy_populations(items, self.ws.group(group).samples, owner=group)
         self.data_changed([s for s, _ in items] + result.added + result.updated)
         return self._report(result, group)
@@ -423,6 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         items = [(s, p) for s, p in items if s != sample and (p or self.samples[s].gates.root.children)]
         if not items:
             return None
+        self.record()
         result = self.ws.copy_populations(items, [sample], owner=None)
         self.data_changed([sample])
         return self._report(result, sample)
@@ -445,8 +485,9 @@ class MainWindow(QtWidgets.QMainWindow):
         spec = self.ask_stat(a)
         if spec is None:
             return
+        self.record()
         a.add_stat(path, spec)
-        self.refresh_tree(a.name)
+        self.data_changed([a.name])
 
     def delete_selected_gate(self):
         """Delete the selected gate (with its children) or statistic."""
@@ -455,12 +496,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         spec = self.selected_stat()
         if spec is not None:
+            self.record()
             a.remove_stat(path, spec)
             self.data_changed([a.name])
             self.select(a.name, path)
             return
         if not path:
             return
+        self.record()
         a.remove_gate(path)
         self.data_changed([a.name])
         self.select(a.name, path[:-1])

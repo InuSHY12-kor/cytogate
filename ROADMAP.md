@@ -84,3 +84,13 @@
 - 축 옆 T 버튼 → 축 변환 창: 히스토그램 미리보기, Scale·Min/Max, Extra Neg. Decades, Width Basis(슬라이더·입력), Positive Decades, Calculate Width Basis, 양 끝 −/+, 그룹 전체 적용, Apply/Cancel
   - Width Basis −100의 Min이 약 −1636으로 FlowJo 화면 예시(−1627.954)와 0.5% 이내
 - 트리에서 게이트 여러 개를 그룹으로 끌어다 놓으면 그룹 게이트로 복사, 샘플 위에 놓으면 그 샘플에만 복사
+
+### 사용자 요청: FlowJo Graph Window 구조·기능 (docs.flowjo.com Graph Window 문서 기준)
+- Y 파라미터 선택을 Y축 옆 세로 버튼으로 이동(검색 가능한 목록), X는 X축 아래, 각 축 옆 T 버튼
+- 메뉴: File(닫기, 모두 닫기, 창 크기 초기화, Export Graphics As PNG/JPG/SVG/PDF/BMP/TIFF, Print), Edit(Undo/Redo, Clear, Copy Image ±투명, Copy Histogram Function 4096 bins, Add Statistic), Graph(Duplicate View, Transpose Axes, Manually Enter Gate), Display(Grid, Large Dots, Gate Frequencies/Names, Medians, Uncompensated Parameters), Go(Workspace, 상위/하위, 다음/이전 샘플, 다음/이전 X·Y)
+- 상단: Undo/Redo, ◀ ▶ (Shift: 같은 샘플의 모든 그래프 창), ▲ ▼, 브레드크럼(▸ 그룹 샘플 목록, › 형제 게이트 목록), Duplicate
+- T 버튼 메뉴: Linear / Log / Biex / Reset / Customize Axis…, 축 가장자리 이벤트 8% 초과 시 경고 문구 + T 버튼 주황 테두리
+- 하단 패널(접기/펼치기): Options(Type, 전경/배경색, Smooth, Show Outliers, Histogram Y), Active Gate(Events Inside, Tint, −/+ 크기), Statistics(Count/부모/비율, 통계 목록, Add Statistics)
+- 게이트 클릭 → 활성 게이트(빨간 윤곽 + 꼭짓점/모서리 핸들로 모양 변경), 방향키 1픽셀 이동, Delete 삭제, Esc 선택 해제
+- 새 게이트 이름 제안: FlowJo식 "X, Y subset"
+- 미구현(문서에 있음): 3D 보기, Graph Window Movies, Magnetic gate, Event # 파라미터, Copy To Layout Editor(7단계)

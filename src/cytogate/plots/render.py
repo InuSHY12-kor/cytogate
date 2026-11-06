@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import binary_dilation, gaussian_filter
 
 __all__ = [
     "PlotType", "HistogramY", "bin2d", "density", "probability_levels",
@@ -101,6 +101,7 @@ def render_2d(
     level: float = 0.05,
     show_outliers: bool = True,
     dot_color=(0, 0, 0),
+    large_dots: bool = False,
 ) -> Rendered2D:
     counts = bin2d(x, y, res)
     dens = density(counts)
@@ -129,6 +130,10 @@ def render_2d(
             image[occupied] = (*dot_color, 255)
     else:
         raise ValueError(f"{kind} is not a 2D plot type")
+    if large_dots:  # FlowJo "Draw Large Dots": grow single-colour dots by one pixel
+        dots = np.all(image == (*dot_color, 255), axis=-1)
+        grown = binary_dilation(dots) & (image[:, :, 3] == 0)
+        image[grown] = (*dot_color, 255)
     return Rendered2D(image, counts, dens, levels)
 
 
