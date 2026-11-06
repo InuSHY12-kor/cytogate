@@ -18,7 +18,7 @@
 | 6. 그룹·일괄 적용 | 그룹, 게이트 일괄 적용, 샘플별 조정 | 여러 파일 일괄 처리 | ✅ |
 | 7. 출력 | Table Editor, Layout Editor, `.wsp` 저장/열기, 그래프·레이아웃 PDF/PNG/SVG/PPTX/HTML, 게이트 이벤트 FCS/CSV 내보내기 | FlowJo에서 `.wsp` 열기 | ✅ (FlowJo에서 열어보기는 8단계) |
 | 8. 검증 | 실제 FlowJo 분석 결과와 1:1 수치 비교 | 차이 리포트 | 🟡 (FlowJo 10.0 공개 데이터로 1차 완료, 최신 FlowJo 통계값 비교는 데이터 확보 후) |
-| 9. 배포 | Windows `.exe` (PyInstaller) | 더블클릭 실행 | ⬜ |
+| 9. 배포 | Windows `.exe` (PyInstaller) | 더블클릭 실행 | 🟡 (빌드 자동화 완료, Windows 실행 확인 대기) |
 | 선택 | tSNE/UMAP, FlowSOM, 세포 주기, 증식 분석 | — | ⬜ |
 
 각 단계는 별도 브랜치에서 작업하고, 테스트 통과 후 `main`에 합친다.
@@ -138,3 +138,10 @@
   - FCS 2.0 비트 단위 압축 정수 데이터($PnB 9 등) 읽기 — 해석 방식(앞쪽 비트부터)은 표준 해석이며 실제 기기 파일로는 미검증
 - 사용하지 못한 데이터: LabKey 테스트 데이터(FlowJo 10.8, 통계 다수)는 FCS 내용이 무작위 값으로 바뀌어 있어(개인정보 보호로 추정) 비교 불가. FlowRepository FR-FCM-Z6UG는 사이트 인증서 만료로 다운로드 불가
 - 남은 일: 최신 FlowJo(10.8 이상)가 계산한 Median/Mean/CV/Geo. Mean/SD 값과 원본 FCS가 함께 있는 데이터로 FlowJo 방식(4096칸) 통계 비교
+
+### 9단계 (배포)
+- `packaging/cytogate.spec` (PyInstaller, 폴더형 빌드 — 한 파일형보다 실행이 빠름), 아이콘 `packaging/cytogate.ico` (`packaging/make_icon.py`로 생성), 버전 정보
+- `CytoGate.exe --selftest [결과.txt]`: 가상 FCS를 만들어 읽기·보정·게이팅·통계·`.wsp` 저장/열기·FCS/CSV 내보내기·표(CSV/TXT/XLSX/HTML)·레이아웃(PDF/PNG/SVG/PPTX/HTML)·창 열기까지 점검. 빌드에서 빠진 파일이 있으면 여기서 드러남
+- GitHub Actions `Windows build`: main에 올릴 때마다 Windows에서 테스트 → exe 빌드 → 자체 점검 → zip을 Artifacts로 저장. `v*` 태그를 올리면 Release에 zip 첨부
+- 크기 줄이기: pyarrow(160MB, pandas 선택 기능), 쓰지 않는 Qt 모듈(QML/Quick/PDF/WebEngine 등) 제외 → Linux 빌드 기준 588MB → 425MB (압축 전)
+- Linux에서 같은 spec으로 빌드한 실행 파일의 자체 점검 통과 확인. Windows exe는 GitHub Actions 결과로 확인

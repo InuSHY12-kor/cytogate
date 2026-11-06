@@ -12,7 +12,16 @@
 
 ![작업 공간 창과 그래프 창](docs/images/gating.png)
 
-## 실행 (Windows)
+## 설치 (Windows, Python 없이)
+
+1. GitHub 저장소의 **Releases**에서 `CytoGate-<버전>-windows-x64.zip`을 받습니다.
+   (최신 개발 빌드는 **Actions → Windows build → 마지막 실행 → Artifacts**에 있습니다.)
+2. 압축을 풀고 `CytoGate` 폴더 안의 **`CytoGate.exe`**를 더블클릭합니다. 설치 과정은 없습니다.
+3. 처음 실행할 때 Windows SmartScreen이 "알 수 없는 게시자" 경고를 띄우면 **추가 정보 → 실행**을 누릅니다
+   (코드 서명 인증서가 없는 개인 프로그램이라 뜨는 경고입니다).
+4. 동작 확인: 명령 프롬프트에서 `CytoGate.exe --selftest 결과.txt`를 실행하면 읽기·게이팅·통계·모든 저장 형식을 점검하고 결과를 파일에 씁니다.
+
+## 실행 (Windows, 소스에서)
 
 Python 3.11 이상이 필요합니다. 명령 프롬프트(cmd)에서 저장소 폴더로 이동한 뒤:
 
