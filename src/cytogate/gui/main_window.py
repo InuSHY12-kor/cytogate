@@ -1,147 +1,153 @@
-"""Main window: workspace tree (samples and populations) on the left, graph on the right.
+"""Workspace window, like FlowJo's: groups on top, samples and their
+populations below. Double-click a sample or population to open a graph window
+for it (several can be open at once).
 
-Select a sample or population to plot its events; gates drawn on the graph
-become children of the selected population.
+Drag & drop:
+- select gates (Ctrl/Shift for several) and drop them on a group, e.g.
+  "All Samples", to copy them to every sample in it as group gates;
+- drop them on another sample to copy them to that sample only;
+- drop FCS files or folders anywhere to add samples.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..core import EllipseGate, PolygonGate, ProcessedSample, RectangleGate, quadrant_gates
+from ..core import ProcessedSample
 from ..core.analysis import AnalyzedSample
-from ..core.gating import translate_gate
-from ..core.workspace import ALL_SAMPLES, Workspace
+from ..core.workspace import ALL_SAMPLES, ApplyResult, Workspace
 from ..io import FcsReadError, load_fcs
-from ..plots import HistogramY, PlotType
-from .gate_tools import TOOLS
-from .plot_view import PlotView
+from .graph_window import GraphWindow
 from .stat_dialog import StatDialog, format_stat
-from .transform_dialog import KINDS, NAMES, TransformDialog, starter_transform
 
-HISTOGRAM_CHOICE = "Histogram"
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 STAT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1  # StatSpec on statistic rows
-DEFAULT_GATE_NAMES = {"Rectangle": "Rectangle", "Polygon": "Polygon", "Ellipse": "Ellipse", "Range": "Range"}
+POP_MIME = "application/x-cytogate-populations"
+
+
+def encode_populations(items) -> QtCore.QMimeData:
+    md = QtCore.QMimeData()
+    md.setData(POP_MIME, QtCore.QByteArray(json.dumps([[s, list(p)] for s, p in items]).encode()))
+    return md
+
+
+def decode_populations(md: QtCore.QMimeData) -> list[tuple[str, tuple[str, ...]]]:
+    if not md.hasFormat(POP_MIME):
+        return []
+    return [(s, tuple(p)) for s, p in json.loads(bytes(md.data(POP_MIME)).decode())]
+
+
+class SampleTree(QtWidgets.QTreeWidget):
+    """Samples and populations. Gates can be dragged out; gates or files dropped in."""
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self.setHeaderLabels(["Name", "Statistic", "#Cells"])
+        header = self.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2):
+            header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragDrop)
+
+    def mimeTypes(self):
+        return [POP_MIME]
+
+    def mimeData(self, items):
+        return encode_populations(self.main.populations_of(items))
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat(POP_MIME) or e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        md = e.mimeData()
+        if md.hasUrls():
+            self.main.add_samples([u.toLocalFile() for u in md.urls()])
+        elif md.hasFormat(POP_MIME):
+            item = self.itemAt(e.position().toPoint())
+            if item is not None:
+                self.main.drop_on_sample(decode_populations(md), item.data(0, ROLE)[0])
+        e.acceptProposedAction()
+
+
+class GroupTable(QtWidgets.QTreeWidget):
+    """Groups with their sizes. Dropping gates on a group applies them to it."""
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self.setHeaderLabels(["Group", "Size"])
+        self.setRootIsDecorated(False)
+        self.header().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.setMaximumHeight(140)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DropOnly)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat(POP_MIME):
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if self.itemAt(e.position().toPoint()) is not None:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        item = self.itemAt(e.position().toPoint())
+        if item is not None:
+            self.main.drop_on_group(decode_populations(e.mimeData()), item.data(0, ROLE))
+            e.acceptProposedAction()
 
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CytoGate")
-        self.resize(1200, 760)
+        self.setWindowTitle("CytoGate — Workspace")
+        self.resize(640, 760)
         self.ws = Workspace()
         self.samples: dict[str, AnalyzedSample] = self.ws.samples  # same dict
+        self.graphs: list[GraphWindow] = []
 
-        # groups pane (FlowJo's group list above the samples)
-        self.group_list = QtWidgets.QListWidget()
-        self.group_list.setMaximumHeight(130)
-        self.group_list.currentItemChanged.connect(lambda *_: self._group_changed())
-        group_bar = QtWidgets.QToolBar("Groups")
-        group_bar.addAction("New Group…", self.new_group_dialog)
-        group_bar.addAction("Delete Group", self.delete_current_group)
-
-        # workspace tree: samples with their populations (FlowJo-style columns)
-        self.tree = QtWidgets.QTreeWidget()
-        self.tree.setHeaderLabels(["Name", "Statistic", "#Cells"])
-        header = self.tree.header()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        for col in (1, 2):
-            header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.tree.currentItemChanged.connect(lambda *_: self._selection_changed())
-        QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Delete, self.tree, activated=self.delete_selected_gate)
-
-        # graph controls
-        self.x_box, self.y_box = QtWidgets.QComboBox(), QtWidgets.QComboBox()
-        self.type_box = QtWidgets.QComboBox()
-        self.type_box.addItems([t.value for t in PlotType if t != PlotType.HISTOGRAM])
-        self.type_box.setCurrentText(PlotType.PSEUDOCOLOR.value)  # FlowJo's default
-        self.hist_y_box = QtWidgets.QComboBox()
-        self.hist_y_box.addItems([h.value for h in HistogramY])
-        self.x_xf, self.y_xf = QtWidgets.QComboBox(), QtWidgets.QComboBox()
-        for box in (self.x_xf, self.y_xf):
-            box.addItems(KINDS)
-        self.x_custom = QtWidgets.QToolButton(text="…", toolTip="Customize X axis")
-        self.y_custom = QtWidgets.QToolButton(text="…", toolTip="Customize Y axis")
-
-        controls = QtWidgets.QGridLayout()
-        controls.addWidget(QtWidgets.QLabel("X"), 0, 0)
-        controls.addWidget(self.x_box, 0, 1)
-        controls.addWidget(self.x_xf, 0, 2)
-        controls.addWidget(self.x_custom, 0, 3)
-        controls.addWidget(QtWidgets.QLabel("Y"), 1, 0)
-        controls.addWidget(self.y_box, 1, 1)
-        controls.addWidget(self.y_xf, 1, 2)
-        controls.addWidget(self.y_custom, 1, 3)
-        controls.addWidget(QtWidgets.QLabel("Plot"), 0, 4)
-        controls.addWidget(self.type_box, 0, 5)
-        controls.addWidget(QtWidgets.QLabel("Histogram Y"), 1, 4)
-        controls.addWidget(self.hist_y_box, 1, 5)
-        controls.setColumnStretch(1, 1)
-
-        # gate tools
-        self.gate_bar = QtWidgets.QToolBar("Gates")
-        self.tool_group = QtGui.QActionGroup(self)
-        self.tool_group.setExclusionPolicy(QtGui.QActionGroup.ExclusionPolicy.ExclusiveOptional)
-        self.tool_actions: dict[str, QtGui.QAction] = {}
-        for tool in TOOLS:
-            act = self.gate_bar.addAction(tool)
-            act.setCheckable(True)
-            self.tool_group.addAction(act)
-            self.tool_actions[tool] = act
-        self.tool_group.triggered.connect(self._tool_changed)
-        self.gate_bar.addSeparator()
-        self.gate_bar.addAction("Delete", self.delete_selected_gate)
-        self.gate_bar.addSeparator()
-        self.gate_bar.addAction("Add Statistic…", self.add_stat_dialog)
-        self.gate_bar.addSeparator()
-        self.gate_bar.addAction("Apply to Group", self.apply_to_current_group)
-
-        self.view = PlotView()
-        self.view.viewbox.shapeDrawn.connect(self.shape_drawn)
-        right = QtWidgets.QWidget()
-        rl = QtWidgets.QVBoxLayout(right)
-        rl.addLayout(controls)
-        rl.addWidget(self.gate_bar)
-        rl.addWidget(self.view, 1)
-
-        left = QtWidgets.QWidget()
-        ll = QtWidgets.QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
-        ll.addWidget(QtWidgets.QLabel("Groups"))
-        ll.addWidget(group_bar)
-        ll.addWidget(self.group_list)
-        ll.addWidget(self.tree, 1)
-
-        split = QtWidgets.QSplitter()
-        split.addWidget(left)
-        split.addWidget(right)
-        split.setSizes([480, 720])
-        self.setCentralWidget(split)
-
-        bar = self.addToolBar("Main")
+        bar = self.addToolBar("Workspace")
         bar.setMovable(False)
         bar.addAction("Add Samples…", self.add_samples_dialog)
         bar.addAction("Add Folder…", self.add_folder_dialog)
         bar.addSeparator()
-        bar.addAction("Export Graph…", self.export_graph_dialog)
-        self.statusBar()
-        self.setAcceptDrops(True)
+        bar.addAction("New Group…", self.new_group_dialog)
+        bar.addAction("Delete Group", self.delete_current_group)
+        bar.addSeparator()
+        bar.addAction("Add Statistic…", self.add_stat_dialog)
+        bar.addAction("Apply to Group", self.apply_to_current_group)
+        bar.addAction("Delete", self.delete_selected_gate)
 
-        for box in (self.x_box, self.y_box, self.type_box, self.hist_y_box):
-            box.currentIndexChanged.connect(self.redraw)
-        self.x_box.currentIndexChanged.connect(self._sync_xf_boxes)
-        self.y_box.currentIndexChanged.connect(self._sync_xf_boxes)
-        self.y_box.currentIndexChanged.connect(self._sync_tools)
-        self.x_xf.activated.connect(lambda: self._xf_kind_chosen(self.x_box, self.x_xf))
-        self.y_xf.activated.connect(lambda: self._xf_kind_chosen(self.y_box, self.y_xf))
-        self.x_custom.clicked.connect(lambda: self._customize(self.x_box))
-        self.y_custom.clicked.connect(lambda: self._customize(self.y_box))
+        self.group_list = GroupTable(self)
+        self.group_list.currentItemChanged.connect(lambda *_: self._group_changed())
+        self.tree = SampleTree(self)
+        self.tree.itemDoubleClicked.connect(lambda item, _col: self.open_graph_for_item(item))
+        QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Delete, self.tree, activated=self.delete_selected_gate)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), self.tree,
+                        activated=lambda: self.open_graph_for_item(self.tree.currentItem()))
+
+        central = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.addWidget(self.group_list)
+        layout.addWidget(self.tree, 1)
+        self.setCentralWidget(central)
+        self.statusBar().showMessage("Add samples, then double-click a sample or gate to open a graph.")
+        self.setAcceptDrops(True)
+        self.refresh_groups()
 
     # --- samples ----------------------------------------------------------
     def add_samples(self, paths) -> list[str]:
@@ -169,38 +175,94 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"{len(self.samples)} samples")
         return errors
 
-    # --- groups -----------------------------------------------------------
-    def current_group(self) -> str:
-        item = self.group_list.currentItem()
-        return item.data(ROLE) if item else ALL_SAMPLES
+    def add_samples_dialog(self):
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Add Samples", "", "FCS files (*.fcs *.FCS);;All files (*)")
+        if files:
+            self.add_samples(files)
 
-    def refresh_groups(self, select: str | None = None) -> None:
-        keep = select or self.current_group()
-        self.group_list.blockSignals(True)
-        self.group_list.clear()
-        for name, g in self.ws.groups.items():
-            it = QtWidgets.QListWidgetItem(f"{name} ({len(g.samples)})")
-            it.setData(ROLE, name)
-            self.group_list.addItem(it)
-            if name == keep:
-                self.group_list.setCurrentItem(it)
-        if self.group_list.currentItem() is None and self.group_list.count():
-            self.group_list.setCurrentRow(0)
-        self.group_list.blockSignals(False)
-        self._group_changed()
+    def add_folder_dialog(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add Folder")
+        if folder:
+            self.add_samples([folder])
 
-    def _group_changed(self) -> None:
-        """Show only the samples of the selected group."""
-        members = set(self.ws.group(self.current_group()).samples) if self.samples else set()
+    def dragEnterEvent(self, e: QtGui.QDragEnterEvent):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e: QtGui.QDropEvent):
+        self.add_samples([u.toLocalFile() for u in e.mimeData().urls()])
+
+    # --- graph windows ----------------------------------------------------------
+    def open_graph(self, sample: str, path=()) -> GraphWindow:
+        """Open (or bring forward) a graph window for a population."""
+        path = tuple(path)
+        known = self.samples[sample].gates.paths()
+        while path and path not in known:
+            path = path[:-1]
+        for g in self.graphs:
+            if g.sample_name == sample and g.path == path:
+                g.show()
+                g.raise_()
+                g.activateWindow()
+                return g
+        g = GraphWindow(self, sample, path)
+        g.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        g.destroyed.connect(lambda *_, g=g: self.graphs.remove(g) if g in self.graphs else None)
+        self.graphs.append(g)
+        n = len(self.graphs) - 1  # cascade new windows beside the workspace
+        g.move(self.geometry().right() + 10 + 24 * n, self.geometry().top() + 24 * n)
+        g.show()
+        return g
+
+    def open_graph_for_item(self, item) -> GraphWindow | None:
+        if item is None:
+            return None
+        name, path = item.data(0, ROLE)
+        return self.open_graph(name, path)
+
+    def data_changed(self, names) -> None:
+        """Gates, statistics or transforms of these samples changed."""
+        names = list(dict.fromkeys(names))
+        for n in names:
+            if n in self.samples:
+                self.refresh_tree(n)
+        for g in list(self.graphs):
+            if g.sample_name in names:
+                g.refresh()
+
+    def visible_samples(self) -> list[str]:
+        """Samples of the current group, in workspace order (graph window ◀ ▶)."""
+        members = set(self.ws.group(self.current_group()).samples)
+        return [n for n in self.samples if n in members]
+
+    # --- selection ----------------------------------------------------------
+    def selection(self) -> tuple[AnalyzedSample, tuple[str, ...]] | tuple[None, None]:
+        item = self.tree.currentItem()
+        if item is None:
+            return None, None
+        name, path = item.data(0, ROLE)
+        return self.samples[name], tuple(path)
+
+    def selected_stat(self):
+        item = self.tree.currentItem()
+        return item.data(0, STAT_ROLE) if item is not None else None
+
+    def sample_item(self, name: str) -> QtWidgets.QTreeWidgetItem:
         for i in range(self.tree.topLevelItemCount()):
             it = self.tree.topLevelItem(i)
-            it.setHidden(it.data(0, ROLE)[0] not in members)
-        cur = self.tree.currentItem()
-        if cur is not None and cur.isHidden() or cur is None:
-            visible = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())
-                       if not self.tree.topLevelItem(i).isHidden()]
-            if visible:
-                self.tree.setCurrentItem(visible[0])
+            if it.data(0, ROLE)[0] == name:
+                return it
+        raise KeyError(name)
+
+    def find_item(self, name: str, path) -> QtWidgets.QTreeWidgetItem:
+        item = self.sample_item(name)
+        for part in path:
+            item = next(item.child(i) for i in range(item.childCount())
+                        if item.child(i).text(0) == part and item.child(i).data(0, STAT_ROLE) is None)
+        return item
+
+    def select(self, name: str, path=()) -> None:
+        self.tree.setCurrentItem(self.find_item(name, tuple(path)))
 
     def selected_sample_names(self) -> list[str]:
         names = []
@@ -209,6 +271,104 @@ class MainWindow(QtWidgets.QMainWindow):
             if name not in names:
                 names.append(name)
         return names
+
+    def populations_of(self, items) -> list[tuple[str, tuple[str, ...]]]:
+        """(sample, path) of tree items, skipping statistic rows; a sample row means its whole tree."""
+        out = []
+        for it in items:
+            if it is None or it.data(0, STAT_ROLE) is not None:
+                continue
+            name, path = it.data(0, ROLE)
+            if (name, tuple(path)) not in out:
+                out.append((name, tuple(path)))
+        return out
+
+    # --- population tree ----------------------------------------------------
+    def refresh_tree(self, name: str) -> None:
+        """Rebuild the population rows under one sample, keeping the selection."""
+        a = self.samples[name]
+        cur_item = self.tree.currentItem()
+        cur = cur_item.data(0, ROLE) if cur_item is not None else None
+        top = self.sample_item(name)
+        top.takeChildren()
+
+        def add_stats(parent_item, pop):
+            for spec in pop.stats:
+                label = a.ps.parameter(spec.parameter).label if spec.parameter else None
+                it = QtWidgets.QTreeWidgetItem(["Σ " + spec.label(label), format_stat(spec.stat, a.stat(pop.path, spec)), ""])
+                it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight)
+                it.setData(0, ROLE, (name, pop.path))
+                it.setData(0, STAT_ROLE, spec)
+                parent_item.addChild(it)
+
+        def add(parent_item, pop):
+            it = QtWidgets.QTreeWidgetItem([pop.name, f"{a.freq_of_parent(pop.path):.3g}", f"{a.count(pop.path):,}"])
+            for col in (1, 2):
+                it.setTextAlignment(col, QtCore.Qt.AlignmentFlag.AlignRight)
+            it.setData(0, ROLE, (name, pop.path))
+            if pop.owning_group:
+                font = it.font(0)
+                font.setBold(True)
+                it.setFont(0, font)
+                it.setToolTip(0, f"Group gate: {pop.owning_group}")
+            parent_item.addChild(it)
+            add_stats(it, pop)
+            for c in pop.children:
+                add(it, c)
+
+        add_stats(top, a.gates.root)
+        for pop in a.gates.root.children:
+            add(top, pop)
+        top.setExpanded(True)
+        self.tree.expandAll()
+        if cur is not None and cur[0] == name:
+            path = tuple(cur[1])
+            while True:
+                try:
+                    self.tree.setCurrentItem(self.find_item(name, path))
+                    break
+                except StopIteration:
+                    path = path[:-1]
+
+    # --- groups -----------------------------------------------------------
+    def current_group(self) -> str:
+        item = self.group_list.currentItem()
+        return item.data(0, ROLE) if item else ALL_SAMPLES
+
+    def group_item(self, name: str) -> QtWidgets.QTreeWidgetItem:
+        for i in range(self.group_list.topLevelItemCount()):
+            if self.group_list.topLevelItem(i).data(0, ROLE) == name:
+                return self.group_list.topLevelItem(i)
+        raise KeyError(name)
+
+    def refresh_groups(self, select: str | None = None) -> None:
+        keep = select or self.current_group()
+        self.group_list.blockSignals(True)
+        self.group_list.clear()
+        for name, g in self.ws.groups.items():
+            it = QtWidgets.QTreeWidgetItem([name, str(len(g.samples))])
+            it.setData(0, ROLE, name)
+            it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight)
+            self.group_list.addTopLevelItem(it)
+            if name == keep:
+                self.group_list.setCurrentItem(it)
+        if self.group_list.currentItem() is None and self.group_list.topLevelItemCount():
+            self.group_list.setCurrentItem(self.group_list.topLevelItem(0))
+        self.group_list.blockSignals(False)
+        self._group_changed()
+
+    def _group_changed(self) -> None:
+        """Show only the samples of the selected group."""
+        members = set(self.ws.group(self.current_group()).samples)
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            it.setHidden(it.data(0, ROLE)[0] not in members)
+        cur = self.tree.currentItem()
+        if cur is None or cur.isHidden():
+            visible = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())
+                       if not self.tree.topLevelItem(i).isHidden()]
+            if visible:
+                self.tree.setCurrentItem(visible[0])
 
     def ask_group_name(self) -> str | None:
         """Prompt for a new group name (replaced in tests)."""
@@ -235,152 +395,44 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.ws.delete_group(name)
         self.refresh_groups(select=ALL_SAMPLES)
-        for n in self.samples:
-            self.refresh_tree(n)
+        self.data_changed(list(self.samples))
 
-    def apply_to_current_group(self):
-        """Copy the selected population (or a sample's whole gate tree) to every
-        sample in the current group."""
-        a, path = self.selection()
-        if a is None:
-            return None
-        group = self.current_group()
-        if not path and not a.gates.root.children:
-            return None
-        result = self.ws.apply_to_group(a.name, path, group)
-        for n in self.ws.group(group).samples:
-            self.refresh_tree(n)
-        self.select(a.name, path)
-        msg = f"Applied to {len(result.added) + len(result.updated)} sample(s) in {group}"
+    # --- copying gates ------------------------------------------------------
+    def _report(self, result: ApplyResult, where: str) -> ApplyResult:
+        n = len(result.added) + len(result.updated)
+        msg = f"Copied to {n} sample(s) in {where}"
         if result.skipped:
             msg += f"; skipped {len(result.skipped)}"
             QtWidgets.QMessageBox.warning(
-                self, "Apply to Group",
-                "Not applied to:\n" + "\n".join(f"{k}: {v}" for k, v in result.skipped.items()))
+                self, "Copy gates",
+                "Not copied to:\n" + "\n".join(f"{k}: {v}" for k, v in result.skipped.items()))
         self.statusBar().showMessage(msg)
         return result
 
-    def add_samples_dialog(self):
-        files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Add Samples", "", "FCS files (*.fcs *.FCS);;All files (*)")
-        if files:
-            self.add_samples(files)
+    def drop_on_group(self, items, group: str) -> ApplyResult | None:
+        """Gates dropped on a group: copy them to every sample in it as group gates."""
+        items = [(s, p) for s, p in items if p or self.samples[s].gates.root.children]
+        if not items:
+            return None
+        result = self.ws.copy_populations(items, self.ws.group(group).samples, owner=group)
+        self.data_changed([s for s, _ in items] + result.added + result.updated)
+        return self._report(result, group)
 
-    def add_folder_dialog(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add Folder")
-        if folder:
-            self.add_samples([folder])
+    def drop_on_sample(self, items, sample: str) -> ApplyResult | None:
+        """Gates dropped on a sample: copy them to that sample only."""
+        items = [(s, p) for s, p in items if s != sample and (p or self.samples[s].gates.root.children)]
+        if not items:
+            return None
+        result = self.ws.copy_populations(items, [sample], owner=None)
+        self.data_changed([sample])
+        return self._report(result, sample)
 
-    def dragEnterEvent(self, e: QtGui.QDragEnterEvent):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
+    def apply_to_current_group(self) -> ApplyResult | None:
+        """Copy the selected gates (or a sample's whole tree) to the current group."""
+        items = self.tree.selectedItems() or [self.tree.currentItem()]
+        return self.drop_on_group(self.populations_of(items), self.current_group())
 
-    def dropEvent(self, e: QtGui.QDropEvent):
-        self.add_samples([u.toLocalFile() for u in e.mimeData().urls()])
-
-    # --- selection ----------------------------------------------------------
-    def selection(self) -> tuple[AnalyzedSample, tuple[str, ...]] | tuple[None, None]:
-        item = self.tree.currentItem()
-        if item is None:
-            return None, None
-        name, path = item.data(0, ROLE)
-        return self.samples[name], tuple(path)
-
-    def current(self) -> ProcessedSample | None:
-        a, _ = self.selection()
-        return a.ps if a else None
-
-    def sample_item(self, name: str) -> QtWidgets.QTreeWidgetItem:
-        for i in range(self.tree.topLevelItemCount()):
-            it = self.tree.topLevelItem(i)
-            if it.data(0, ROLE)[0] == name:
-                return it
-        raise KeyError(name)
-
-    def find_item(self, name: str, path) -> QtWidgets.QTreeWidgetItem:
-        item = self.sample_item(name)
-        for part in path:
-            item = next(item.child(i) for i in range(item.childCount())
-                        if item.child(i).text(0) == part and item.child(i).data(0, STAT_ROLE) is None)
-        return item
-
-    def _selection_changed(self):
-        a, path = self.selection()
-        if a is None:
-            return
-        ps = a.ps
-        old_x, old_y = self.x_box.currentData(), self.y_box.currentData()
-        for box in (self.x_box, self.y_box):
-            box.blockSignals(True)
-            box.clear()
-        for p in ps.parameters:
-            self.x_box.addItem(p.label, p.name)
-            self.y_box.addItem(p.label, p.name)
-        self.y_box.addItem(HISTOGRAM_CHOICE, None)
-        names = [p.name for p in ps.parameters]
-        default_x = next((n for n in ("FSC-A", "FSC-H") if n in names), names[0])
-        default_y = next((n for n in ("SSC-A", "SSC-H") if n in names), names[min(1, len(names) - 1)])
-        self.x_box.setCurrentIndex(names.index(old_x) if old_x in names else names.index(default_x))
-        if old_y is None and old_x is not None:
-            self.y_box.setCurrentIndex(self.y_box.count() - 1)
-        else:
-            self.y_box.setCurrentIndex(names.index(old_y) if old_y in names else names.index(default_y))
-        for box in (self.x_box, self.y_box):
-            box.blockSignals(False)
-        self._sync_xf_boxes()
-        self._sync_tools()
-        self.redraw()
-
-    # --- population tree ----------------------------------------------------
-    def refresh_tree(self, name: str) -> None:
-        """Rebuild the population items under one sample, keeping the selection."""
-        a = self.samples[name]
-        cur = self.selection()
-        top = self.sample_item(name)
-        top.takeChildren()
-
-        def add_stats(parent_item, pop):
-            for spec in pop.stats:
-                label = a.ps.parameter(spec.parameter).label if spec.parameter else None
-                it = QtWidgets.QTreeWidgetItem(["Σ " + spec.label(label), format_stat(spec.stat, a.stat(pop.path, spec)), ""])
-                it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight)
-                it.setData(0, ROLE, (name, pop.path))
-                it.setData(0, STAT_ROLE, spec)
-                parent_item.addChild(it)
-
-        def add(parent_item, pop):
-            n = a.count(pop.path)
-            it = QtWidgets.QTreeWidgetItem([pop.name, f"{a.freq_of_parent(pop.path):.3g}", f"{n:,}"])
-            for col in (1, 2):
-                it.setTextAlignment(col, QtCore.Qt.AlignmentFlag.AlignRight)
-            it.setData(0, ROLE, (name, pop.path))
-            if pop.owning_group:
-                font = it.font(0)
-                font.setBold(True)
-                it.setFont(0, font)
-                it.setToolTip(0, f"Group gate: {pop.owning_group}")
-            parent_item.addChild(it)
-            add_stats(it, pop)
-            for c in pop.children:
-                add(it, c)
-
-        add_stats(top, a.gates.root)
-        for pop in a.gates.root.children:
-            add(top, pop)
-        top.setExpanded(True)
-        self.tree.expandAll()
-        if cur[0] is a:
-            try:
-                self.tree.setCurrentItem(self.find_item(name, cur[1]))
-            except StopIteration:
-                self.tree.setCurrentItem(top)
-
-    def select(self, name: str, path=()) -> None:
-        self.tree.setCurrentItem(self.find_item(name, tuple(path)))
-
-    def selected_stat(self):
-        item = self.tree.currentItem()
-        return item.data(0, STAT_ROLE) if item is not None else None
-
+    # --- statistics ----------------------------------------------------------
     def ask_stat(self, a: AnalyzedSample):
         """Show the Add Statistic dialog; returns a StatSpec or None (replaced in tests)."""
         dlg = StatDialog([(p.name, p.label) for p in a.ps.parameters], self)
@@ -404,145 +456,14 @@ class MainWindow(QtWidgets.QMainWindow):
         spec = self.selected_stat()
         if spec is not None:
             a.remove_stat(path, spec)
-            self.tree.setCurrentItem(self.sample_item(a.name))
-            self.refresh_tree(a.name)
+            self.data_changed([a.name])
             self.select(a.name, path)
             return
         if not path:
             return
         a.remove_gate(path)
-        self.tree.setCurrentItem(self.sample_item(a.name))
-        self.refresh_tree(a.name)
+        self.data_changed([a.name])
         self.select(a.name, path[:-1])
-        self.redraw()
-
-    # --- gating ---------------------------------------------------------------
-    def _tool_changed(self, *_):
-        act = self.tool_group.checkedAction()
-        self.view.viewbox.set_tool(act.text() if act else None)
-
-    def _sync_tools(self, *_):
-        hist = self.y_box.currentData() is None
-        for tool, act in self.tool_actions.items():
-            ok = (tool == "Range") == hist
-            act.setEnabled(ok)
-            if not ok and act.isChecked():
-                act.setChecked(False)
-                self.view.viewbox.set_tool(None)
-
-    def ask_gate_name(self, default: str) -> str | None:
-        """Prompt for a gate name (replaced in tests)."""
-        name, ok = QtWidgets.QInputDialog.getText(self, "Gate Name", "Name:", text=default)
-        return name.strip() if ok and name.strip() else None
-
-    def shape_drawn(self, tool: str, pts) -> list[tuple[str, ...]]:
-        """Turn a drawn shape (display units) into gate(s) under the selected population."""
-        a, parent = self.selection()
-        if a is None:
-            return []
-        ps = a.ps
-        x = self.x_box.currentData()
-        y = self.y_box.currentData()
-        xfx = ps.transforms[x]
-        to_x = lambda v: float(xfx.inverse(np.array([v]))[0])  # noqa: E731
-        if y is not None:
-            xfy = ps.transforms[y]
-            to_y = lambda v: float(xfy.inverse(np.array([v]))[0])  # noqa: E731
-
-        if tool == "Quadrant":
-            (qx, qy), = pts
-            xs, ys = ps.parameter(x), ps.parameter(y)
-            made = []
-            for qname, gate in quadrant_gates(x, y, to_x(qx), to_y(qy), xs.stain or xs.name, ys.stain or ys.name):
-                made.append(a.add_gate(parent, a.unique_name(parent, qname), gate).path)
-            self._after_gating(a, parent)
-            return made
-
-        if tool == "Range":
-            (x0, _), (x1, _) = pts
-            gate = RectangleGate((x,), (to_x(x0),), (to_x(x1),))
-        elif tool == "Rectangle":
-            (x0, y0), (x1, y1) = pts
-            gate = RectangleGate((x, y), (to_x(min(x0, x1)), to_y(min(y0, y1))), (to_x(max(x0, x1)), to_y(max(y0, y1))))
-        elif tool == "Ellipse":
-            (x0, y0), (x1, y1) = pts
-            w, h = abs(x1 - x0) / 2, abs(y1 - y0) / 2
-            center = ((x0 + x1) / 2, (y0 + y1) / 2)
-            gate = EllipseGate((x, y), center, max(w, h), min(w, h), 0.0 if w >= h else np.pi / 2)
-        elif tool == "Polygon":
-            gate = PolygonGate((x, y), tuple((to_x(px), to_y(py)) for px, py in pts))
-        else:
-            return []
-        name = self.ask_gate_name(a.unique_name(parent, DEFAULT_GATE_NAMES[tool]))
-        if not name:
-            return []
-        try:
-            pop = a.add_gate(parent, name, gate)
-        except ValueError as exc:
-            QtWidgets.QMessageBox.warning(self, "Gate", str(exc))
-            return []
-        self._after_gating(a, parent)
-        return [pop.path]
-
-    def _after_gating(self, a: AnalyzedSample, parent) -> None:
-        self.refresh_tree(a.name)
-        self.select(a.name, parent)
-        self.redraw()
-
-    # --- transforms -------------------------------------------------------
-    def _sync_xf_boxes(self):
-        ps = self.current()
-        if ps is None:
-            return
-        for pbox, xbox in ((self.x_box, self.x_xf), (self.y_box, self.y_xf)):
-            name = pbox.currentData()
-            xbox.setEnabled(name is not None)
-            if name is not None:
-                xbox.setCurrentText(NAMES[type(ps.transforms[name])])
-
-    def _transform_changed(self):
-        a, _ = self.selection()
-        a.invalidate()  # gates are evaluated in display space
-        self.refresh_tree(a.name)
-        self.redraw()
-
-    def _xf_kind_chosen(self, pbox, xbox):
-        ps, name = self.current(), pbox.currentData()
-        if ps is None or name is None:
-            return
-        ps.set_transform(name, starter_transform(xbox.currentText(), ps.parameter(name), ps.transforms[name]))
-        self._transform_changed()
-
-    def _customize(self, pbox):
-        ps, name = self.current(), pbox.currentData()
-        if ps is None or name is None:
-            return
-        dlg = TransformDialog(ps.parameter(name), ps.transforms[name], self)
-        if dlg.exec():
-            ps.set_transform(name, dlg.transform())
-            self._sync_xf_boxes()
-            self._transform_changed()
-
-    # --- drawing ----------------------------------------------------------
-    def redraw(self, *_):
-        a, path = self.selection()
-        if a is None or self.x_box.currentData() is None:
-            self.view.clear()
-            return
-        x, y = self.x_box.currentData(), self.y_box.currentData()
-        kind = PlotType.HISTOGRAM if y is None else PlotType(self.type_box.currentText())
-        self.type_box.setEnabled(y is not None)
-        self.hist_y_box.setEnabled(y is None)
-        population = path[-1] if path else "Ungated"
-        self.view.show_sample(a.ps, x, y, kind, HistogramY(self.hist_y_box.currentText()),
-                              population=population, mask=a.mask(path))
-        children = a.gates.get(path).children
-        self.view.show_gates(
-            a.ps, x, y,
-            [(c.name, c.gate, a.freq_of_parent(c.path), c.label_offset, (a.name, c.path)) for c in children if c.gate.dims],
-            on_label_moved=self.label_moved,
-            on_gate_moved=self.gate_moved,
-        )
 
     def ask_scope(self, group: str, n: int) -> str | None:
         """Ask whether a change to a group gate applies to the whole group.
@@ -556,36 +477,7 @@ class MainWindow(QtWidgets.QMainWindow):
         box.exec()
         return {whole: "group", one: "sample"}.get(box.clickedButton())
 
-    def gate_moved(self, key, dx: float, dy: float) -> list[str]:
-        """A gate was dragged on the plot: move it (display units)."""
-        name, path = key
-        a = self.samples[name]
-        pop = a.gates.get(path)
-        x, y = self.x_box.currentData(), self.y_box.currentData()
-        deltas = {a.ps.parameter(x).name: dx}
-        if y is not None:
-            deltas[a.ps.parameter(y).name] = dy
-        new_gate = translate_gate(pop.gate, a.ps, deltas)
-        linked = self.ws.linked_samples(name, path)
-        whole = True
-        if len(linked) > 1:
-            scope = self.ask_scope(pop.owning_group, len(linked))
-            if scope is None:
-                self.redraw()
-                return []
-            whole = scope == "group"
-        changed = self.ws.update_gate(name, path, new_gate, whole_group=whole)
-        for n in changed:
-            self.refresh_tree(n)
-        self.redraw()
-        return changed
-
-    def label_moved(self, key, offset) -> None:
-        """A gate label was dragged on the plot; remember where."""
-        name, path = key
-        self.samples[name].gates.get(path).label_offset = offset
-
-    def export_graph_dialog(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Graph", "graph.png", "PNG image (*.png)")
-        if path:
-            self.view.export_png(path)
+    def closeEvent(self, e):
+        for g in list(self.graphs):
+            g.close()
+        super().closeEvent(e)

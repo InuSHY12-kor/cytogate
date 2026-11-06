@@ -10,7 +10,7 @@
 
 진행 계획은 [ROADMAP.md](ROADMAP.md)를 보세요.
 
-![메인 화면](docs/images/gating_quadrants.png)
+![작업 공간 창과 그래프 창](docs/images/gating.png)
 
 ## 실행 (Windows)
 
@@ -32,7 +32,17 @@ pip install -e ".[gui]"
 python -m cytogate gui
 ```
 
-창이 열리면 **Add Samples…** / **Add Folder…** 로 FCS 파일을 불러오거나, 파일을 창에 끌어다 놓으면 됩니다.
+## 사용법
+
+- **샘플 불러오기:** 작업 공간 창에서 **Add Samples…** / **Add Folder…**, 또는 FCS 파일을 창에 끌어다 놓기
+- **그래프 창 열기:** 샘플이나 게이트를 **더블클릭** (Enter). 여러 개를 동시에 열 수 있습니다
+- **그래프 창 버튼**
+  - ◀ ▶ : 이전/다음 샘플 (같은 게이트·축·그래프 종류 유지, 현재 그룹 순서) — Ctrl+←/→
+  - ▲ ▼ : 상위 게이트 / 첫 번째 하위 게이트 — Ctrl+↑/↓
+  - 위쪽 경로(샘플 › Lymphocytes › CD3+)를 누르면 그 단계로 이동
+  - 축 옆 **T** : 축 변환 창 (Scale, Min/Max, Width Basis 등, 양 끝 −/+ 로 범위 조정, Apply로 적용)
+- **게이트:** 그래프 창의 Rectangle / Polygon / Ellipse / Quadrant / Range로 그리기. 도구를 끈 상태에서 게이트 안쪽을 끌면 이동, 라벨을 끌면 라벨만 이동(더블클릭하면 원위치)
+- **게이트 복사:** 트리에서 게이트를 여러 개 골라 그룹 표의 **All Samples**(또는 다른 그룹)로 끌어다 놓으면 그 그룹 전체에, 다른 샘플 위에 놓으면 그 샘플에만 복사
 
 | Pseudocolor | Contour | Density | Histogram |
 |---|---|---|---|

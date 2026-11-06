@@ -97,30 +97,56 @@ class Workspace:
     # --- applying gates -----------------------------------------------------
     def apply_to_group(self, source: str, path, group: str) -> ApplyResult:
         """Copy population `path` of sample `source` (and everything under it) to
-        every other sample in `group`. path=() copies the whole gate tree."""
-        path = tuple(path)
-        src_pop = self.samples[source].gates.get(path)
-        tops = list(src_pop.children) if not path else [src_pop]
-        parent_path = path[:-1] if path else ()
+        every other sample in `group`. path=() copies the whole gate tree.
+        The copies (and the source) become owned by the group."""
+        return self.copy_populations([(source, path)], self.group(group).samples, owner=group)
+
+    def copy_populations(self, items, targets, owner: str | None = None) -> ApplyResult:
+        """Copy populations to other samples, each under the same parent path.
+
+        items   = [(sample, path)]; path=() means the sample's whole gate tree.
+                  A population whose ancestor is also listed is copied with it.
+        targets = sample names (sources among them are left as they are).
+        owner   = group that will own the copies, or None for sample-owned
+                  copies (FlowJo: dropping a gate on one sample).
+        """
+        items = [(s, tuple(p)) for s, p in items]
+        listed = set(items)
+        items = [(s, p) for s, p in items
+                 if not any((s, p[:i]) in listed for i in range(len(p)))]  # drop listed descendants
         result = ApplyResult()
-        # the source's own copies become group-owned too
-        for top in tops:
-            _set_owner(top, group)
-        for name in self.group(group).samples:
-            if name == source:
+        sources = {s for s, _ in items}
+        for s, p in items:
+            if owner is not None:
+                for top in self._tops(s, p):
+                    _set_owner(top, owner)
+        for name in targets:
+            if name in sources:
                 continue
             a = self.samples[name]
-            try:
-                parent = a.gates.get(parent_path)
-            except KeyError:
-                result.skipped[name] = f"no population {'/'.join(parent_path)}"
-                continue
-            changed = False
-            for top in tops:
-                changed |= _merge(parent, top, group)
+            changed = added = False
+            for s, p in items:
+                parent_path = p[:-1] if p else ()
+                try:
+                    parent = a.gates.get(parent_path)
+                except KeyError:
+                    result.skipped[name] = f"no population {'/'.join(parent_path)}"
+                    continue
+                for top in self._tops(s, p):
+                    if _merge(parent, top, owner):
+                        changed = True
+                    else:
+                        added = True
             a.invalidate()
-            (result.updated if changed else result.added).append(name)
+            if changed:
+                result.updated.append(name)
+            elif added:
+                result.added.append(name)
         return result
+
+    def _tops(self, sample: str, path) -> list[Population]:
+        pop = self.samples[sample].gates.get(path)
+        return list(pop.children) if not path else [pop]
 
     def linked_samples(self, sample: str, path) -> list[str]:
         """Samples whose population `path` shares the group-owned gate of `sample`."""
@@ -158,7 +184,7 @@ def _set_owner(pop: Population, group: str) -> None:
         _set_owner(c, group)
 
 
-def _merge(parent: Population, src: Population, group: str) -> bool:
+def _merge(parent: Population, src: Population, group: str | None) -> bool:
     """Put a copy of `src` under `parent`. Returns True if a population was replaced."""
     existing = next((c for c in parent.children if c.name == src.name), None)
     if existing is None:
@@ -175,7 +201,7 @@ def _merge(parent: Population, src: Population, group: str) -> bool:
     return True
 
 
-def _copy(src: Population, parent: Population, group: str) -> Population:
+def _copy(src: Population, parent: Population, group: str | None) -> Population:
     pop = Population(src.name, src.gate, parent=parent, label_offset=src.label_offset,
                      stats=list(copy.copy(src.stats)), owning_group=group)
     pop.children = [_copy(c, pop, group) for c in src.children]

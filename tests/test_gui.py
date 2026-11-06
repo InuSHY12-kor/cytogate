@@ -1,4 +1,8 @@
-"""Phase 3: the desktop window, run headless (QT_QPA_PLATFORM=offscreen)."""
+"""Desktop windows, run headless (QT_QPA_PLATFORM=offscreen).
+
+Structure (like FlowJo): a workspace window with groups and the sample /
+population tree, and separate graph windows opened per population.
+"""
 
 import os
 
@@ -9,94 +13,96 @@ QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 pytest.importorskip("pyqtgraph")
 
 import numpy as np  # noqa: E402
+from PySide6 import QtCore, QtGui  # noqa: E402
 
 from cytogate.core import Biex, Linear, Logicle, axis_ticks  # noqa: E402
-from cytogate.gui.main_window import HISTOGRAM_CHOICE, MainWindow  # noqa: E402
-from cytogate.gui.transform_dialog import TransformDialog  # noqa: E402
+from cytogate.core.axis_tools import axis_min  # noqa: E402
+from cytogate.core.stats import Stat, StatSpec  # noqa: E402
+from cytogate.gui.graph_window import HISTOGRAM_CHOICE  # noqa: E402
+from cytogate.gui.main_window import POP_MIME, MainWindow, decode_populations, encode_populations  # noqa: E402
 from cytogate.plots import PlotType  # noqa: E402
 
 FOLDER = "8_color_data_set/fcs_files"
+E01, E03, E05 = (f"101_DEN084Y5_15_{s}_clean.fcs" for s in ("E01_008", "E03_009", "E05_010"))
 
 
 @pytest.fixture(scope="module")
 def app():
+    import pyqtgraph as pg
+
+    # Tests send mouse moves faster than a hand can; don't let pyqtgraph drop them.
+    pg.setConfigOptions(mouseRateLimit=-1)
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 @pytest.fixture
 def win(app, data_dir):
     w = MainWindow()
-    w.resize(1100, 700)
     w.show()
     w.add_samples([data_dir / FOLDER])
     yield w
     w.close()
 
 
-def test_samples_listed_with_counts(win):
-    rows = [(win.tree.topLevelItem(i).text(0), win.tree.topLevelItem(i).text(2)) for i in range(win.tree.topLevelItemCount())]
-    assert rows == [
-        ("101_DEN084Y5_15_E01_008_clean.fcs", "290,172"),
-        ("101_DEN084Y5_15_E03_009_clean.fcs", "283,969"),
-        ("101_DEN084Y5_15_E05_010_clean.fcs", "285,290"),
-    ]
+@pytest.fixture
+def g(win, monkeypatch):
+    """Graph window for E01 (ungated), FSC-A x SSC-A, gate names auto-accepted."""
+    from cytogate.gui.graph_window import GraphWindow
+
+    monkeypatch.setattr(GraphWindow, "ask_gate_name", lambda self, default: default)
+    gw = win.open_graph(E01)
+    gw.resize(560, 660)
+    QtWidgets.QApplication.processEvents()
+    return gw
 
 
-def test_default_graph_is_fsc_ssc_pseudocolor(win):
-    assert win.x_box.currentData() == "FSC-A"
-    assert win.y_box.currentData() == "SSC-A"
-    assert win.type_box.currentText() == "Pseudocolor"
-    assert win.view.last_render.counts.sum() == 290172
-    assert "290,172" in win.view.title.text()
+def rows(item):
+    return [(item.child(i).text(0), item.child(i).text(1), item.child(i).text(2)) for i in range(item.childCount())]
 
 
-@pytest.mark.parametrize("kind", [PlotType.DOT, PlotType.CONTOUR, PlotType.DENSITY])
-def test_switch_plot_type(win, kind):
-    win.type_box.setCurrentText(kind.value)
-    assert win.view.last_render.counts.sum() == 290172
+def set_axes(gw, x, y):
+    gw.x_box.setCurrentIndex(gw.x_box.findData(x))
+    if y is None:
+        gw.y_box.setCurrentIndex(gw.y_box.findText(HISTOGRAM_CHOICE))
+    else:
+        gw.y_box.setCurrentIndex(gw.y_box.findData(y))
 
 
-def test_histogram_choice(win):
-    win.x_box.setCurrentIndex(win.x_box.findData("Comp-CD3 APC-H7 FLR-A"))
-    win.y_box.setCurrentIndex(win.y_box.findText(HISTOGRAM_CHOICE))
-    assert win.view.last_render.sum() == 290172
-    assert not win.type_box.isEnabled() and win.hist_y_box.isEnabled()
-    win.hist_y_box.setCurrentText("Normalized To Mode")
-    assert win.view.last_render.max() == pytest.approx(100)
+# --- mouse helpers -----------------------------------------------------------------------
+
+def _send(vp, kind, pt, button, buttons):
+    pos = QtCore.QPointF(pt)
+    ev = QtGui.QMouseEvent(kind, pos, pos, vp.mapToGlobal(pos), button, buttons, QtCore.Qt.KeyboardModifier.NoModifier)
+    QtWidgets.QApplication.sendEvent(vp, ev)
 
 
-def test_axis_ticks_follow_transform(win):
-    win.x_box.setCurrentIndex(win.x_box.findData("Comp-CD4 PE-Cy7 FLR-A"))
-    axis = win.view.plot.getAxis("bottom")
-    expected = [(t.position, t.label) for t in axis_ticks(Biex()) if t.major]
-    assert axis._tickLevels[0] == expected
+def drag(gw, start, end):
+    """Left-drag on a graph from `start` to `end` (display units)."""
+    view, vb = gw.view.plot, gw.view.viewbox
+    to_w = lambda x, y: QtCore.QPointF(view.mapFromScene(vb.mapViewToScene(QtCore.QPointF(x, y))))  # noqa: E731
+    p0, p1 = to_w(*start), to_w(*end)
+    vp = view.viewport()
+    L, N, T = QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton, QtCore.QEvent.Type
+    _send(vp, T.MouseButtonPress, p0, L, L)
+    for t in np.linspace(0, 1, 10)[1:]:
+        _send(vp, T.MouseMove, p0 + (p1 - p0) * float(t), N, L)
+    _send(vp, T.MouseButtonRelease, p1, L, N)
+    QtWidgets.QApplication.processEvents()
 
 
-def test_change_transform_kind(win):
-    win.x_box.setCurrentIndex(win.x_box.findData("Comp-CD4 PE-Cy7 FLR-A"))
-    win.x_xf.setCurrentText("Logicle")
-    win._xf_kind_chosen(win.x_box, win.x_xf)
-    assert isinstance(win.current().transforms["Comp-CD4 PE-Cy7 FLR-A"], Logicle)
-    # each sample keeps its own transforms
-    other = win.samples["101_DEN084Y5_15_E03_009_clean.fcs"].ps
-    assert isinstance(other.transforms["Comp-CD4 PE-Cy7 FLR-A"], Biex)
+def drop(widget, item_rect_center, md):
+    ev = QtGui.QDropEvent(QtCore.QPointF(item_rect_center), QtCore.Qt.DropAction.CopyAction, md,
+                          QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.KeyboardModifier.NoModifier)
+    widget.dropEvent(ev)
 
 
-def test_transform_dialog(app, win):
-    ps = win.current()
-    dlg = TransformDialog(ps.parameter("FSC-A"), ps.transforms["FSC-A"])
-    assert set(dlg.fields) == {"min_range", "max_range"}
-    dlg.fields["max_range"].setValue(200000)
-    assert dlg.transform() == Linear(0, 200000)
-    dlg.kind.setCurrentText("Biex")
-    dlg.fields["width"].setValue(-100)
-    assert dlg.transform() == Biex(width=-100, max_range=262144)
+# --- workspace window ----------------------------------------------------------------------
 
-
-def test_export_png(win, tmp_path):
-    out = tmp_path / "g.png"
-    assert win.view.export_png(str(out))
-    assert out.stat().st_size > 5000
+def test_samples_and_groups_listed(win):
+    tops = [(win.tree.topLevelItem(i).text(0), win.tree.topLevelItem(i).text(2)) for i in range(win.tree.topLevelItemCount())]
+    assert tops == [(E01, "290,172"), (E03, "283,969"), (E05, "285,290")]
+    top = win.group_list.topLevelItem(0)
+    assert (top.text(0), top.text(1)) == ("All Samples", "3")
 
 
 def test_bad_file_reported(app, tmp_path, monkeypatch):
@@ -106,179 +112,136 @@ def test_bad_file_reported(app, tmp_path, monkeypatch):
     bad.write_bytes(b"nope")
     w = MainWindow()
     assert w.add_samples([bad])
-    assert shown and "bad.fcs" in shown[0]
-    assert w.tree.topLevelItemCount() == 0
+    assert shown and "bad.fcs" in shown[0] and w.tree.topLevelItemCount() == 0
 
 
-# --- gating (phase 4) ------------------------------------------------------------
-
-E01 = "101_DEN084Y5_15_E01_008_clean.fcs"
-
-
-@pytest.fixture
-def gw(win, monkeypatch):
-    """Window with E01 selected, FSC-A x SSC-A, gate names auto-accepted."""
-    monkeypatch.setattr(win, "ask_gate_name", lambda default: default)
-    win.select(E01)
-    win.x_box.setCurrentIndex(win.x_box.findData("FSC-A"))
-    win.y_box.setCurrentIndex(win.y_box.findData("SSC-A"))
-    return win
-
-
-def item_rows(item):
-    return [(item.child(i).text(0), item.child(i).text(1), item.child(i).text(2)) for i in range(item.childCount())]
+def test_double_click_opens_graph_windows(win):
+    win.tree.itemDoubleClicked.emit(win.sample_item(E01), 0)
+    assert len(win.graphs) == 1
+    gw = win.graphs[0]
+    assert gw.isWindow() and gw.windowTitle() == f"{E01}: Ungated"
+    assert (gw.x, gw.y, gw.type_box.currentText()) == ("FSC-A", "SSC-A", "Pseudocolor")
+    assert gw.view.last_render.counts.sum() == 290172
+    assert gw.footer.text() == "Count: 290,172"
+    assert win.open_graph(E01) is gw  # same population: brought forward, not duplicated
+    other = win.open_graph(E03)
+    assert len(win.graphs) == 2 and other is not gw
+    other.close()
+    QtWidgets.QApplication.processEvents()
+    assert win.graphs == [gw]
 
 
-def test_rectangle_gate_from_shape(gw):
-    a = gw.samples[E01]
-    [path] = gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    assert path == ("Rectangle",)
+def test_plot_types_and_histogram(g):
+    for kind in (PlotType.DOT, PlotType.CONTOUR, PlotType.DENSITY):
+        g.type_box.setCurrentText(kind.value)
+        assert g.view.last_render.counts.sum() == 290172
+    set_axes(g, "Comp-CD3 APC-H7 FLR-A", None)
+    assert g.view.last_render.sum() == 290172
+    assert not g.type_box.isEnabled() and g.tool_actions["Range"].isEnabled()
+    g.hist_y_box.setCurrentText("Normalized To Mode")
+    assert g.view.last_render.max() == pytest.approx(100)
+    set_axes(g, "Comp-CD4 PE-Cy7 FLR-A", "SSC-A")
+    expected = [(t.position, t.label) for t in axis_ticks(Biex()) if t.major]
+    assert g.view.plot.getAxis("bottom")._tickLevels[0] == expected
+
+
+# --- gating in a graph window ------------------------------------------------------------------
+
+def test_rectangle_gate_updates_tree_and_plot(win, g):
+    a = win.samples[E01]
+    [path] = g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
     n = a.count(path)
     xs, ys = a.ps.scaled("FSC-A"), a.ps.scaled("SSC-A")
     assert n == int(((xs >= 0.2) & (xs <= 0.6) & (ys >= 0.05) & (ys <= 0.35)).sum())
-    rows = item_rows(gw.sample_item(E01))
-    assert rows == [("Rectangle", f"{100 * n / 290172:.3g}", f"{n:,}")]
-    assert len(gw.view.gate_items) == 2  # outline + label on the plot
+    assert rows(win.sample_item(E01)) == [("Rectangle", f"{100 * n / 290172:.3g}", f"{n:,}")]
+    assert len(g.view.gate_items) == 2  # outline + label
 
 
-def test_nested_gate_and_population_plot(gw):
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    gw.select(E01, ("Rectangle",))
-    a = gw.samples[E01]
-    assert f"{a.count(('Rectangle',)):,}" in gw.view.title.text()
-    [path] = gw.shape_drawn("Ellipse", [(0.3, 0.1), (0.5, 0.3)])
+def test_population_window_and_nested_gate(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    sub = win.open_graph(E01, ("Rectangle",))
+    a = win.samples[E01]
+    n = a.count(("Rectangle",))
+    assert sub.windowTitle() == f"{E01}: Rectangle"
+    assert sub.view.last_render.counts.sum() == n
+    assert sub.footer.text().startswith(f"Count: {n:,} / 290,172")
+    # axes default to those of the gate that made the population
+    assert (sub.x, sub.y) == ("FSC-A", "SSC-A")
+    [path] = sub.shape_drawn("Ellipse", [(0.3, 0.1), (0.5, 0.3)])
     assert path == ("Rectangle", "Ellipse")
-    assert 0 < a.count(path) < a.count(("Rectangle",))
+    assert 0 < a.count(path) < n
 
 
-def test_polygon_through_viewbox_signal(gw):
-    vb = gw.view.viewbox
-    gw.tool_actions["Polygon"].trigger()
-    assert vb.tool == "Polygon"
+def test_polygon_through_viewbox(win, g):
+    g.tool_actions["Polygon"].trigger()
+    vb = g.view.viewbox
     for p in [(0.2, 0.05), (0.6, 0.05), (0.6, 0.4), (0.2, 0.4)]:
         vb.add_polygon_point(p)
-    vb.add_polygon_point((0.2, 0.05))  # click on the first vertex closes it
-    a = gw.samples[E01]
-    assert ("Polygon",) in a.gates.paths()
-    assert isinstance(a.gates.get(("Polygon",)).gate.vertices, tuple)
+    vb.add_polygon_point((0.2, 0.05))  # clicking the first vertex closes it
+    assert ("Polygon",) in win.samples[E01].gates.paths()
 
 
-def test_quadrants_sum_to_parent(gw):
-    gw.x_box.setCurrentIndex(gw.x_box.findData("Comp-CD4 PE-Cy7 FLR-A"))
-    gw.y_box.setCurrentIndex(gw.y_box.findData("Comp-CD8 PerCP-Cy55 FLR-A"))
-    made = gw.shape_drawn("Quadrant", [(0.45, 0.45)])
+def test_quadrants_and_range(win, g):
+    set_axes(g, "Comp-CD4 PE-Cy7 FLR-A", "Comp-CD8 PerCP-Cy55 FLR-A")
+    made = g.shape_drawn("Quadrant", [(0.45, 0.45)])
+    a = win.samples[E01]
     assert [p[0][:2] for p in made] == ["Q1", "Q2", "Q3", "Q4"]
-    a = gw.samples[E01]
     assert sum(a.count(p) for p in made) == 290172
+    assert all(s.on_moved is None for s in g.view.gate_shapes())  # quadrants are not dragged
+    set_axes(g, "Comp-CD3 APC-H7 FLR-A", None)
+    [path] = g.shape_drawn("Range", [(0.55, 0.0), (1.0, 0.0)])
+    assert a.count(path) == int((a.ps.scaled("Comp-CD3 APC-H7 FLR-A") >= 0.55).sum())
 
 
-def test_range_gate_on_histogram(gw):
-    gw.x_box.setCurrentIndex(gw.x_box.findData("Comp-CD3 APC-H7 FLR-A"))
-    gw.y_box.setCurrentIndex(gw.y_box.findText(HISTOGRAM_CHOICE))
-    assert gw.tool_actions["Range"].isEnabled() and not gw.tool_actions["Rectangle"].isEnabled()
-    [path] = gw.shape_drawn("Range", [(0.55, 0.0), (1.0, 0.0)])
-    a = gw.samples[E01]
-    cd3 = a.ps.scaled("Comp-CD3 APC-H7 FLR-A")
-    assert a.count(path) == int((cd3 >= 0.55).sum())  # drawn to the axis edge: open-ended
+def test_mouse_drag_draws_rectangle(win, g):
+    g.tool_actions["Rectangle"].trigger()
+    drag(g, (0.2, 0.1), (0.6, 0.4))
+    gate = win.samples[E01].gates.get(("Rectangle",)).gate
+    assert win.samples[E01].ps.transforms["FSC-A"].apply([gate.mins[0]])[0] == pytest.approx(0.2, abs=0.02)
 
 
-def test_delete_gate(gw):
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    gw.select(E01, ("Rectangle",))
-    gw.delete_selected_gate()
-    assert gw.samples[E01].gates.paths() == []
-    assert gw.sample_item(E01).childCount() == 0
+def test_delete_gate_moves_open_window_to_parent(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    sub = win.open_graph(E01, ("Rectangle",))
+    win.select(E01, ("Rectangle",))
+    win.delete_selected_gate()
+    assert win.samples[E01].gates.paths() == []
+    assert sub.path == () and sub.windowTitle() == f"{E01}: Ungated"
 
 
-def test_mouse_drag_draws_rectangle(gw, app):
-    from PySide6 import QtCore, QtGui
-
-    gw.tool_actions["Rectangle"].trigger()
-    app.processEvents()
-    vb = gw.view.viewbox
-    view = gw.view.plot
-
-    def to_widget(x, y):
-        scene = vb.mapViewToScene(QtCore.QPointF(x, y))
-        return view.mapFromScene(scene)
-
-    p0, p1 = to_widget(0.2, 0.1), to_widget(0.6, 0.4)
-    vp = view.viewport()
-    left, none = QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton
-    mods = QtCore.Qt.KeyboardModifier.NoModifier
-
-    def send(kind, pt, button, buttons):
-        pos = QtCore.QPointF(pt)
-        ev = QtGui.QMouseEvent(kind, pos, pos, vp.mapToGlobal(pos), button, buttons, mods)
-        QtWidgets.QApplication.sendEvent(vp, ev)
-
-    send(QtCore.QEvent.Type.MouseButtonPress, p0, left, left)
-    for t in np.linspace(0, 1, 10)[1:]:
-        pt = QtCore.QPointF(p0.x() + (p1.x() - p0.x()) * t, p0.y() + (p1.y() - p0.y()) * t)
-        send(QtCore.QEvent.Type.MouseMove, pt, none, left)
-    send(QtCore.QEvent.Type.MouseButtonRelease, p1, left, none)
-    app.processEvents()
-    gate = gw.samples[E01].gates.get(("Rectangle",)).gate
-    lo = gw.samples[E01].ps.transforms["FSC-A"].apply(np.array([gate.mins[0]]))[0]
-    assert lo == pytest.approx(0.2, abs=0.02)
+def test_missing_population_falls_back(win, g):
+    sub = win.open_graph(E03, ("Nope",))
+    assert sub.path == ()
 
 
-# --- draggable gate labels ---------------------------------------------------------
+# --- labels and moving gates -----------------------------------------------------------------
 
-def _mouse(vp, kind, pt, button, buttons):
-    from PySide6 import QtCore, QtGui
-    pos = QtCore.QPointF(pt)
-    ev = QtGui.QMouseEvent(kind, pos, pos, vp.mapToGlobal(pos), button, buttons, QtCore.Qt.KeyboardModifier.NoModifier)
-    QtWidgets.QApplication.sendEvent(vp, ev)
-
-
-def _drag(view, vb, start_view, end_view, app):
-    from PySide6 import QtCore
-    to_w = lambda x, y: QtCore.QPointF(view.mapFromScene(vb.mapViewToScene(QtCore.QPointF(x, y))))  # noqa: E731
-    p0, p1 = to_w(*start_view), to_w(*end_view)
-    vp = view.viewport()
-    L, N, T = QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton, QtCore.QEvent.Type
-    _mouse(vp, T.MouseButtonPress, p0, L, L)
-    for t in np.linspace(0, 1, 10)[1:]:
-        _mouse(vp, T.MouseMove, p0 + (p1 - p0) * float(t), N, L)
-    _mouse(vp, T.MouseButtonRelease, p1, L, N)
-    app.processEvents()
-
-
-def test_drag_gate_label(gw, app):
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    app.processEvents()
-    [label] = gw.view.gate_labels()
+def test_drag_label(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    [label] = g.view.gate_labels()
     start = (label.pos().x(), label.pos().y())
-    _drag(gw.view.plot, gw.view.viewbox, start, (start[0] + 0.25, start[1] + 0.4), app)
-    pop = gw.samples[E01].gates.get(("Rectangle",))
+    drag(g, start, (start[0] + 0.25, start[1] + 0.4))
+    pop = win.samples[E01].gates.get(("Rectangle",))
     assert pop.label_offset == pytest.approx((0.25, 0.4), abs=0.02)
-    # the gate itself did not move
-    assert pop.gate.mins[0] == pytest.approx(float(gw.samples[E01].ps.transforms["FSC-A"].inverse([0.2])[0]))
-    # position is kept when the plot is redrawn
-    gw.redraw()
-    [label] = gw.view.gate_labels()
-    assert label.pos().x() == pytest.approx(start[0] + 0.25, abs=0.02)
+    g.redraw()
+    assert g.view.gate_labels()[0].pos().x() == pytest.approx(start[0] + 0.25, abs=0.02)
 
 
-def test_label_drag_ignored_while_drawing(gw, app):
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    gw.tool_actions["Rectangle"].trigger()
-    app.processEvents()
-    [label] = gw.view.gate_labels()
+def test_drag_histogram_label(win, g):
+    set_axes(g, "Comp-CD3 APC-H7 FLR-A", None)
+    g.shape_drawn("Range", [(0.55, 0.0), (0.9, 0.0)])
+    [label] = g.view.gate_labels()
+    top = g.view.viewbox.viewRange()[1][1]
     start = (label.pos().x(), label.pos().y())
-    _drag(gw.view.plot, gw.view.viewbox, start, (start[0] + 0.2, start[1] + 0.3), app)
-    a = gw.samples[E01]
-    assert a.gates.get(("Rectangle",)).label_offset == (0.0, 0.0)
-    assert ("Rectangle 2",) in a.gates.paths()  # the drag drew a new gate instead
+    drag(g, start, (start[0] - 0.2, start[1] + 0.2 * top))
+    assert win.samples[E01].gates.get(("Range",)).label_offset == pytest.approx((-0.2, 0.2), abs=0.03)
 
 
-def test_label_double_click_resets(gw, app):
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    pop = gw.samples[E01].gates.get(("Rectangle",))
+def test_label_double_click_resets(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    pop = win.samples[E01].gates.get(("Rectangle",))
     pop.label_offset = (0.3, 0.3)
-    gw.redraw()
-    [label] = gw.view.gate_labels()
+    g.redraw()
 
     class Ev:
         def double(self):
@@ -290,58 +253,243 @@ def test_label_double_click_resets(gw, app):
         def ignore(self):
             pass
 
-    label.mouseClickEvent(Ev())
+    g.view.gate_labels()[0].mouseClickEvent(Ev())
     assert pop.label_offset == (0.0, 0.0)
 
 
-def test_drag_histogram_label(gw, app):
-    gw.x_box.setCurrentIndex(gw.x_box.findData("Comp-CD3 APC-H7 FLR-A"))
-    gw.y_box.setCurrentIndex(gw.y_box.findText(HISTOGRAM_CHOICE))
-    gw.shape_drawn("Range", [(0.55, 0.0), (0.9, 0.0)])
-    app.processEvents()
-    [label] = gw.view.gate_labels()
-    top = gw.view.viewbox.viewRange()[1][1]
+def test_drawing_over_a_label_draws_a_gate(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    g.tool_actions["Rectangle"].trigger()
+    [label] = g.view.gate_labels()
     start = (label.pos().x(), label.pos().y())
-    _drag(gw.view.plot, gw.view.viewbox, start, (start[0] - 0.2, start[1] + 0.2 * top), app)
-    off = gw.samples[E01].gates.get(("Range",)).label_offset
-    assert off == pytest.approx((-0.2, 0.2), abs=0.03)
+    drag(g, start, (start[0] + 0.2, start[1] + 0.3))
+    a = win.samples[E01]
+    assert a.gates.get(("Rectangle",)).label_offset == (0.0, 0.0)
+    assert ("Rectangle 2",) in a.gates.paths()
 
 
-# --- statistics (phase 5) --------------------------------------------------------
+def test_move_group_gate(win, g, monkeypatch):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    win.select(E01, ("Rectangle",))
+    assert win.apply_to_current_group().added == [E03, E05]
+    asked = []
+    monkeypatch.setattr(win, "ask_scope", lambda grp, n: asked.append((grp, n)) or "group")
+    drag(g, (0.3, 0.1), (0.4, 0.15))  # inside the gate, away from its label
+    assert asked == [("All Samples", 3)]
+    xf = win.samples[E01].ps.transforms["FSC-A"]
+    for n in (E01, E03, E05):
+        gate = win.samples[n].gates.get(("Rectangle",)).gate
+        assert xf.apply([gate.mins[0]])[0] == pytest.approx(0.3, abs=0.02)
 
-def test_add_and_delete_statistic(gw, monkeypatch):
-    from cytogate.core.stats import Stat, StatSpec
 
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    gw.select(E01, ("Rectangle",))
+def test_move_gate_for_one_sample(win, g, monkeypatch):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    win.select(E01, ("Rectangle",))
+    win.apply_to_current_group()
+    monkeypatch.setattr(win, "ask_scope", lambda grp, n: "sample")
+    drag(g, (0.3, 0.1), (0.3, 0.2))
+    a1, a3 = win.samples[E01], win.samples[E03]
+    assert a1.gates.get(("Rectangle",)).gate != a3.gates.get(("Rectangle",)).gate
+    assert a1.gates.get(("Rectangle",)).owning_group is None
+    assert not win.find_item(E01, ("Rectangle",)).font(0).bold()
+    assert win.find_item(E03, ("Rectangle",)).font(0).bold()
+
+
+def test_move_own_gate_without_asking(win, g, monkeypatch):
+    g.shape_drawn("Ellipse", [(0.2, 0.05), (0.6, 0.35)])
+    monkeypatch.setattr(win, "ask_scope", lambda grp, n: pytest.fail("should not ask"))
+    drag(g, (0.4, 0.12), (0.5, 0.12))
+    assert win.samples[E01].gates.get(("Ellipse",)).gate.center == pytest.approx((0.5, 0.2), abs=0.02)
+
+
+# --- navigation -------------------------------------------------------------------------------
+
+def test_next_previous_sample_keep_plot(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    win.select(E01, ("Rectangle",))
+    win.apply_to_current_group()
+    sub = win.open_graph(E01, ("Rectangle",))
+    set_axes(sub, "Comp-CD4 PE-Cy7 FLR-A", "Comp-CD8 PerCP-Cy55 FLR-A")
+    sub.type_box.setCurrentText("Contour")
+    sub.next_btn.click()
+    assert (sub.sample_name, sub.path) == (E03, ("Rectangle",))
+    assert (sub.x, sub.y, sub.type_box.currentText()) == ("Comp-CD4 PE-Cy7 FLR-A", "Comp-CD8 PerCP-Cy55 FLR-A", "Contour")
+    assert sub.view.last_render.counts.sum() == win.samples[E03].count(("Rectangle",))
+    sub.next_btn.click()
+    assert sub.sample_name == E05
+    sub.next_btn.click()
+    assert sub.sample_name == E01  # wraps around
+    sub.prev_btn.click()
+    assert sub.sample_name == E05
+
+
+def test_next_sample_without_the_population(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    sub = win.open_graph(E01, ("Rectangle",))
+    sub.step_sample(+1)  # E03 has no such gate: show its nearest existing population
+    assert (sub.sample_name, sub.path) == (E03, ())
+
+
+def test_navigation_follows_group(win, g, monkeypatch):
+    monkeypatch.setattr(win, "ask_group_name", lambda: "Pair")
+    win.tree.clearSelection()
+    win.sample_item(E01).setSelected(True)
+    win.sample_item(E05).setSelected(True)
+    win.new_group_dialog()
+    assert win.visible_samples() == [E01, E05]
+    g.step_sample(+1)
+    assert g.sample_name == E05
+
+
+def test_up_down_and_path(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    sub = win.open_graph(E01, ("Rectangle",))
+    sub.shape_drawn("Ellipse", [(0.3, 0.1), (0.5, 0.3)])
+    sub.down_btn.click()
+    assert sub.path == ("Rectangle", "Ellipse")
+    assert sub.crumb_texts() == [E01, "Rectangle", "Ellipse"]
+    assert not sub.down_btn.isEnabled()
+    sub.up_btn.click()
+    sub.up_btn.click()
+    assert sub.path == () and not sub.up_btn.isEnabled()
+
+
+# --- transform window (T buttons) ---------------------------------------------------------------
+
+def test_transform_window_biex(win, g):
+    set_axes(g, "Comp-CD4 PE-Cy7 FLR-A", "SSC-A")
+    ed = g.open_transform_editor("x", show=False)
+    assert ed.scale_box.currentText() == "Biex"
+    assert ed.width_edit.text() == "-10"
+    assert float(ed.min_edit.text()) == pytest.approx(axis_min(Biex()), rel=1e-3) and ed.min_edit.isReadOnly()
+    ed.width.slider.setValue(ed.width.slider.maximum() * 2 // 3)  # 10^2 -> width basis -100
+    assert ed.xf.width == pytest.approx(-100, rel=0.01)
+    assert float(ed.min_edit.text()) < -1000
+    ed.neg.box.setValue(0.5)
+    assert ed.xf.negative == 0.5
+    before = ed.xf
+    ed.adjust_high(+1)
+    assert ed.xf.max_range == pytest.approx(2 * before.max_range)
+    ed.adjust_high(-1)
+    ed.calculate_width_basis()
+    assert -1000 <= ed.xf.width <= -1
+    # nothing changes until Apply
+    assert g.analysis.ps.transforms["Comp-CD4 PE-Cy7 FLR-A"] == Biex(max_range=262144)
+    chosen = ed.xf
+    ed.apply()
+    assert g.analysis.ps.transforms["Comp-CD4 PE-Cy7 FLR-A"] == chosen
+    assert win.samples[E03].ps.transforms["Comp-CD4 PE-Cy7 FLR-A"] == Biex(max_range=262144)  # this sample only
+    assert g.view.plot.getAxis("bottom")._tickLevels[0] == [(t.position, t.label) for t in axis_ticks(chosen) if t.major]
+
+
+def test_transform_window_scale_change_and_group(win, g):
+    ed = g.open_transform_editor("y", show=False)  # SSC-A, linear
+    assert ed.scale_box.currentText() == "Linear" and not ed.min_edit.isReadOnly()
+    ed.max_edit.setText("200000")
+    ed.max_edit.editingFinished.emit()
+    assert ed.xf == Linear(0, 200000)
+    ed.adjust_low(+1)
+    assert ed.xf.min_range < 0
+    ed.scale_box.setCurrentText("Logicle")
+    ed.scale_box.activated.emit(ed.scale_box.currentIndex())
+    assert isinstance(ed.xf, Logicle)
+    ed.group_check.setChecked(True)
+    ed.apply()
+    for n in (E01, E03, E05):
+        assert isinstance(win.samples[n].ps.transforms["SSC-A"], Logicle)
+
+
+def test_transform_window_cancel(win, g):
+    ed = g.open_transform_editor("x", show=False)
+    ed.adjust_high(+1)
+    ed.reject()
+    assert g.analysis.ps.transforms["FSC-A"] == Linear(0, 262144)
+
+
+def test_transform_change_recounts_gates(win, g):
+    set_axes(g, "Comp-CD4 PE-Cy7 FLR-A", "Comp-CD8 PerCP-Cy55 FLR-A")
+    g.shape_drawn("Ellipse", [(0.4, 0.4), (0.7, 0.6)])  # ellipses live in display space
+    a = win.samples[E01]
+    before = a.count(("Ellipse",))
+    ed = g.open_transform_editor("x", show=False)
+    ed.adjust_low(+1)
+    ed.apply()
+    assert a.count(("Ellipse",)) != before
+    assert win.find_item(E01, ("Ellipse",)).text(2) == f"{a.count(('Ellipse',)):,}"
+
+
+# --- drag & drop gates onto groups / samples ---------------------------------------------------
+
+def test_drag_gates_to_all_samples(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    g.shape_drawn("Ellipse", [(0.3, 0.4), (0.5, 0.6)])
+    win.tree.clearSelection()
+    for p in (("Rectangle",), ("Ellipse",)):
+        win.find_item(E01, p).setSelected(True)
+    md = win.tree.mimeData(win.tree.selectedItems())
+    assert md.hasFormat(POP_MIME)
+    assert decode_populations(md) == [(E01, ("Rectangle",)), (E01, ("Ellipse",))]
+    drop(win.group_list, win.group_list.visualItemRect(win.group_item("All Samples")).center(), md)
+    for n in (E03, E05):
+        assert win.samples[n].gates.paths() == [("Rectangle",), ("Ellipse",)]
+        assert win.find_item(n, ("Rectangle",)).font(0).bold()
+        assert win.samples[n].gates.get(("Ellipse",)).owning_group == "All Samples"
+
+
+def test_drop_gate_on_one_sample(win, g):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    drop(win.tree, win.tree.visualItemRect(win.sample_item(E05)).center(), encode_populations([(E01, ("Rectangle",))]))
+    assert win.samples[E05].gates.paths() == [("Rectangle",)]
+    assert win.samples[E05].gates.get(("Rectangle",)).owning_group is None
+    assert win.samples[E03].gates.paths() == []
+
+
+def test_drop_child_without_parent_is_reported(win, g, monkeypatch):
+    warned = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: warned.append(a[2]))
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    sub = win.open_graph(E01, ("Rectangle",))
+    sub.shape_drawn("Ellipse", [(0.3, 0.1), (0.5, 0.3)])
+    result = win.drop_on_group([(E01, ("Rectangle", "Ellipse"))], "All Samples")
+    assert set(result.skipped) == {E03, E05} and warned
+
+
+# --- groups and statistics ------------------------------------------------------------------------
+
+def test_new_group_filters_samples(win, monkeypatch):
+    monkeypatch.setattr(win, "ask_group_name", lambda: "Stim")
+    win.tree.clearSelection()
+    win.sample_item(E03).setSelected(True)
+    win.sample_item(E05).setSelected(True)
+    assert win.new_group_dialog() == "Stim"
+    groups = [(win.group_list.topLevelItem(i).text(0), win.group_list.topLevelItem(i).text(1))
+              for i in range(win.group_list.topLevelItemCount())]
+    assert groups == [("All Samples", "3"), ("Stim", "2")]
+    assert win.sample_item(E01).isHidden() and not win.sample_item(E03).isHidden()
+    win.group_list.setCurrentItem(win.group_item("All Samples"))
+    assert not win.sample_item(E01).isHidden()
+    win.group_list.setCurrentItem(win.group_item("Stim"))
+    win.delete_current_group()
+    assert win.group_list.topLevelItemCount() == 1
+
+
+def test_statistics(win, g, monkeypatch):
+    g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    win.select(E01, ("Rectangle",))
     spec = StatSpec(Stat.MEDIAN, "Comp-CD3 APC-H7 FLR-A")
-    monkeypatch.setattr(gw, "ask_stat", lambda a: spec)
-    gw.add_stat_dialog()
-    pop_item = gw.find_item(E01, ("Rectangle",))
-    stat_rows = [pop_item.child(i) for i in range(pop_item.childCount()) if pop_item.child(i).text(0).startswith("Σ")]
+    monkeypatch.setattr(win, "ask_stat", lambda a: spec)
+    win.add_stat_dialog()
+    item = win.find_item(E01, ("Rectangle",))
+    stat_rows = [item.child(i) for i in range(item.childCount()) if item.child(i).text(0).startswith("Σ")]
     assert [r.text(0) for r in stat_rows] == ["Σ Median : Comp-CD3 APC-H7 FLR-A"]
-    a = gw.samples[E01]
-    assert stat_rows[0].text(1) == f"{a.stat(('Rectangle',), spec):.0f}"
-    # selecting the statistic plots its population; Delete removes only the statistic
-    gw.tree.setCurrentItem(stat_rows[0])
-    assert gw.selection()[1] == ("Rectangle",)
-    gw.delete_selected_gate()
-    assert a.gates.get(("Rectangle",)).stats == []
-    assert ("Rectangle",) in a.gates.paths()
-
-
-def test_statistic_on_sample_root(gw, monkeypatch):
-    from cytogate.core.stats import Stat, StatSpec
-
-    monkeypatch.setattr(gw, "ask_stat", lambda a: StatSpec(Stat.COUNT))
-    gw.select(E01)
-    gw.add_stat_dialog()
-    top = gw.sample_item(E01)
-    assert top.child(0).text(0) == "Σ Count" and top.child(0).text(1) == "290,172"
+    assert stat_rows[0].text(1) == f"{win.samples[E01].stat(('Rectangle',), spec):.0f}"
+    win.tree.setCurrentItem(stat_rows[0])
+    win.delete_selected_gate()
+    assert win.samples[E01].gates.get(("Rectangle",)).stats == []
+    assert ("Rectangle",) in win.samples[E01].gates.paths()
 
 
 def test_stat_dialog(app):
-    from cytogate.core.stats import Stat
     from cytogate.gui.stat_dialog import StatDialog
 
     dlg = StatDialog([("FSC-A", "FSC-A"), ("Comp-R780-A", "Comp-R780-A :: CD3")])
@@ -350,105 +498,4 @@ def test_stat_dialog(app):
     dlg.stat_box.setCurrentIndex(dlg.stat_box.findData(Stat.PERCENTILE))
     dlg.param_box.setCurrentIndex(1)
     dlg.pct_box.setValue(95)
-    s = dlg.spec()
-    assert (s.stat, s.parameter, s.percentile) == (Stat.PERCENTILE, "Comp-R780-A", 95)
-
-
-# --- groups and moving gates (phase 6) ----------------------------------------------
-
-E03, E05 = "101_DEN084Y5_15_E03_009_clean.fcs", "101_DEN084Y5_15_E05_010_clean.fcs"
-
-
-def group_rows(w):
-    return [w.group_list.item(i).text() for i in range(w.group_list.count())]
-
-
-def test_new_group_from_selection_filters_samples(gw, monkeypatch):
-    monkeypatch.setattr(gw, "ask_group_name", lambda: "Stim")
-    gw.tree.clearSelection()
-    gw.sample_item(E03).setSelected(True)
-    gw.sample_item(E05).setSelected(True)
-    assert gw.new_group_dialog() == "Stim"
-    assert group_rows(gw) == ["All Samples (3)", "Stim (2)"]
-    assert gw.current_group() == "Stim"
-    assert gw.sample_item(E01).isHidden() and not gw.sample_item(E03).isHidden()
-    assert gw.selection()[0].name in (E03, E05)  # selection moved to a visible sample
-    gw.group_list.setCurrentRow(0)
-    assert not gw.sample_item(E01).isHidden()
-    gw.group_list.setCurrentRow(1)
-    gw.delete_current_group()
-    assert group_rows(gw) == ["All Samples (3)"]
-
-
-def test_apply_to_group_from_window(gw):
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    gw.select(E01, ("Rectangle",))
-    result = gw.apply_to_current_group()
-    assert result.added == [E03, E05]
-    for n in (E01, E03, E05):
-        item = gw.find_item(n, ("Rectangle",))
-        assert item.font(0).bold()
-        assert item.text(2) == f"{gw.samples[n].count(('Rectangle',)):,}"
-
-
-def _drag_gate(gw, app, start, end):
-    _drag(gw.view.plot, gw.view.viewbox, start, end, app)
-
-
-def test_move_group_gate_for_whole_group(gw, app, monkeypatch):
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    gw.select(E01, ("Rectangle",))
-    gw.apply_to_current_group()
-    gw.select(E01)
-    asked = []
-    monkeypatch.setattr(gw, "ask_scope", lambda g, n: asked.append((g, n)) or "group")
-    app.processEvents()
-    _drag_gate(gw, app, (0.3, 0.1), (0.4, 0.15))  # inside the gate, away from its label
-    assert asked == [("All Samples", 3)]
-    xf = gw.samples[E01].ps.transforms["FSC-A"]
-    for n in (E01, E03, E05):
-        g = gw.samples[n].gates.get(("Rectangle",)).gate
-        assert xf.apply([g.mins[0]])[0] == pytest.approx(0.3, abs=0.02)
-
-
-def test_move_group_gate_for_one_sample(gw, app, monkeypatch):
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    gw.select(E01, ("Rectangle",))
-    gw.apply_to_current_group()
-    gw.select(E03)
-    monkeypatch.setattr(gw, "ask_scope", lambda g, n: "sample")
-    app.processEvents()
-    _drag_gate(gw, app, (0.3, 0.1), (0.3, 0.2))
-    a1, a3 = gw.samples[E01], gw.samples[E03]
-    assert a1.gates.get(("Rectangle",)).gate != a3.gates.get(("Rectangle",)).gate
-    assert a3.gates.get(("Rectangle",)).owning_group is None
-    assert not gw.find_item(E03, ("Rectangle",)).font(0).bold()
-    assert gw.find_item(E01, ("Rectangle",)).font(0).bold()
-
-
-def test_move_own_gate_without_asking(gw, app, monkeypatch):
-    gw.shape_drawn("Ellipse", [(0.2, 0.05), (0.6, 0.35)])
-    monkeypatch.setattr(gw, "ask_scope", lambda g, n: pytest.fail("should not ask"))
-    app.processEvents()
-    _drag_gate(gw, app, (0.4, 0.12), (0.5, 0.12))
-    g = gw.samples[E01].gates.get(("Ellipse",)).gate
-    assert g.center == pytest.approx((0.5, 0.2), abs=0.02)
-
-
-def test_quadrants_are_not_dragged(gw):
-    gw.x_box.setCurrentIndex(gw.x_box.findData("Comp-CD4 PE-Cy7 FLR-A"))
-    gw.y_box.setCurrentIndex(gw.y_box.findData("Comp-CD8 PerCP-Cy55 FLR-A"))
-    gw.shape_drawn("Quadrant", [(0.45, 0.45)])
-    assert all(s.on_moved is None for s in gw.view.gate_shapes())
-
-
-def test_apply_skips_samples_without_parent(gw, monkeypatch):
-    warned = []
-    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: warned.append(a[2]))
-    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
-    gw.select(E01, ("Rectangle",))
-    gw.shape_drawn("Ellipse", [(0.3, 0.1), (0.5, 0.3)])
-    gw.select(E01, ("Rectangle", "Ellipse"))
-    result = gw.apply_to_current_group()
-    assert set(result.skipped) == {E03, E05}
-    assert warned and E03 in warned[0]
+    assert dlg.spec() == StatSpec(Stat.PERCENTILE, "Comp-R780-A", 95)
