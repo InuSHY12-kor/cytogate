@@ -61,6 +61,8 @@ def _dims(gate_el) -> list[ET.Element]:
 
 def _dim_name(dim_el) -> str:
     fd = dim_el.find(_D + "fcs-dimension")
+    if fd is None:  # Gating-ML 1.5 (FlowJo 10.0)
+        fd = dim_el.find(_D + "parameter")
     return fd.get(_D + "name")
 
 
@@ -99,6 +101,9 @@ _FJ_STATS = {
     "Geom. Mean": Stat.GEOMEAN, "Geometric Mean": Stat.GEOMEAN, "Mode": Stat.MODE, "SD": Stat.SD, "CV": Stat.CV,
     "Robust SD": Stat.ROBUST_SD, "Robust CV": Stat.ROBUST_CV, "Median Abs Dev": Stat.MAD, "MADP": Stat.MADP,
     "Percentile": Stat.PERCENTILE,
+    # FlowJo 10 internal names
+    "fj.stat.freqofparent": Stat.FREQ_PARENT, "fj.stat.freqofgrandparent": Stat.FREQ_GRANDPARENT,
+    "fj.stat.freqoftotal": Stat.FREQ_TOTAL, "fj.stat.freqof": Stat.FREQ_OF,
 }
 # FlowJo stores label offsets in graph pixels (256 per axis); we keep display units
 ANNO_SCALE = 256.0
@@ -108,6 +113,8 @@ def parse_statistic(el: ET.Element) -> StatSpec | None:
     stat = _FJ_STATS.get(el.get("name", ""))
     if stat is None:
         return None
+    if stat == Stat.FREQ_OF and (el.get("ancestor") or "") in ("Total", ""):
+        stat = Stat.FREQ_TOTAL  # FlowJo 10.0 writes Freq. of Total as "freq. of" ancestor "Total"
     try:
         anc = el.get("ancestor") or ""
         return StatSpec(
@@ -151,9 +158,31 @@ def _walk(sub_el: ET.Element, tree: GatingTree, parent_path: tuple, counts: dict
             _walk(sp, tree, pop.path, counts)
 
 
+_OLD_NS = {  # FlowJo 10.0.x writes Gating-ML 1.5 namespaces; the elements are the same
+    "http://flowcyt.sourceforge.net/std/Gating-ML/v1.5/gating": NS["gating"],
+    "http://flowcyt.sourceforge.net/std/Gating-ML/v1.5/transformations": NS["transforms"],
+    "http://flowcyt.sourceforge.net/std/Gating-ML/v1.5/datatypes": NS["data-type"],
+}
+
+
+def _normalize_namespaces(root: ET.Element) -> None:
+    def fix(name: str) -> str:
+        if name.startswith("{"):
+            uri, local = name[1:].split("}", 1)
+            if uri in _OLD_NS:
+                return "{%s}%s" % (_OLD_NS[uri], local)
+        return name
+
+    for el in root.iter():
+        el.tag = fix(el.tag)
+        if any(k.startswith("{") for k in el.attrib):
+            el.attrib = {fix(k): v for k, v in el.attrib.items()}
+
+
 def read_wsp(path: str | Path) -> Workspace:
     path = Path(path)
     root = ET.parse(path).getroot()
+    _normalize_namespaces(root)
     samples = []
     for s_el in root.iter("Sample"):
         ds = s_el.find("DataSet")

@@ -306,6 +306,7 @@ def load_fcs(path: str | Path) -> FcsSample:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 flow_data = flowio.FlowData(str(path), **opts)
+                _unpack_bit_packed(path, flow_data, keywords, notes)
                 _sanitize_text(flow_data, notes)
                 sample = fk.Sample(flow_data)
             notes += [str(w.message) for w in caught]
@@ -315,6 +316,58 @@ def load_fcs(path: str | Path) -> FcsSample:
         except Exception as exc:  # flowio raises plain exceptions for bad offsets
             last_exc = exc
     raise FcsReadError(f"{path.name}: {last_exc}") from last_exc
+
+
+PACKED_LAYOUT = ("big", True, None)  # (bit order in bytes, value MSB first, byte-swap word size)
+
+
+def _unpack_bit_packed(path: Path, flow_data: flowio.FlowData, keywords: dict, notes: list[str]) -> None:
+    """FCS 2.0 integer data may pack values in widths that are not whole bytes
+    (e.g. $PnB 9 or 10: values follow each other bit by bit, most significant
+    bit first). flowio cannot read these, so decode them here."""
+    kw = {k.upper(): v for k, v in keywords.items()}
+    if kw.get("$DATATYPE", "").strip().upper() != "I":
+        return
+    n_par = int(kw.get("$PAR", "0"))
+    try:
+        bits = [int(kw[f"$P{i}B"]) for i in range(1, n_par + 1)]
+    except (KeyError, ValueError):
+        return
+    if all(b % 8 == 0 for b in bits):
+        return
+    raw = path.read_bytes()
+    begin = int(raw[26:34]) if raw[26:34].strip() else int(re.sub(r"\D", "", kw.get("$BEGINDATA", "0")))
+    end = int(raw[34:42]) if raw[34:42].strip() else int(re.sub(r"\D", "", kw.get("$ENDDATA", "0")))
+    if begin == 0:
+        begin, end = int(re.sub(r"\D", "", kw.get("$BEGINDATA", "0"))), int(re.sub(r"\D", "", kw.get("$ENDDATA", "0")))
+    total = int(kw.get("$TOT", "0"))
+    data = np.frombuffer(raw[begin:end + 1], dtype=np.uint8)
+    bit_order, value_msb, swap = PACKED_LAYOUT
+    if swap:
+        data = np.concatenate([data, np.zeros((-data.size) % swap, np.uint8)]).reshape(-1, swap)[:, ::-1].ravel()
+    stream = np.unpackbits(data, bitorder=bit_order)
+    row_bits = sum(bits)
+    need = total * row_bits
+    if stream.size < need:
+        raise FcsReadError(f"{path.name}: packed data holds {stream.size} bits, {need} needed")
+    rows = stream[:need].reshape(total, row_bits)
+    out = np.empty((total, n_par), dtype=np.float64)
+    col = 0
+    for j, b in enumerate(bits):
+        weights = ((1 << np.arange(b - 1, -1, -1)) if value_msb else (1 << np.arange(b))).astype(np.int64)
+        out[:, j] = rows[:, col:col + b].astype(np.int64) @ weights
+        col += b
+    # $PnR may be smaller than 2**bits: FCS says to mask with the range
+    for j in range(n_par):
+        try:
+            rng = int(float(kw.get(f"$P{j + 1}R", "0")))
+        except ValueError:
+            rng = 0
+        if rng > 0 and rng & (rng - 1) == 0:
+            out[:, j] = out[:, j].astype(np.int64) & (rng - 1)
+    flow_data.events = out.ravel()
+    flow_data.event_count = total
+    notes.append(f"decoded bit-packed integer data ($PnB {sorted(set(bits))})")
 
 
 def _sanitize_text(flow_data: flowio.FlowData, notes: list[str]) -> None:

@@ -17,7 +17,7 @@
 | 5. 통계 | Count, Freq. of Parent/Total/Grandparent, Median, Mean, Geo. Mean, CV, SD, rCV | FlowJo 계산식과 일치 | ✅ (FlowJo 실제 값 비교는 8단계) |
 | 6. 그룹·일괄 적용 | 그룹, 게이트 일괄 적용, 샘플별 조정 | 여러 파일 일괄 처리 | ✅ |
 | 7. 출력 | Table Editor, Layout Editor, `.wsp` 저장/열기, 그래프·레이아웃 PDF/PNG/SVG/PPTX/HTML, 게이트 이벤트 FCS/CSV 내보내기 | FlowJo에서 `.wsp` 열기 | ✅ (FlowJo에서 열어보기는 8단계) |
-| 8. 검증 | 실제 FlowJo 분석 결과와 1:1 수치 비교 | 차이 리포트 | ⬜ |
+| 8. 검증 | 실제 FlowJo 분석 결과와 1:1 수치 비교 | 차이 리포트 | 🟡 (FlowJo 10.0 공개 데이터로 1차 완료, 최신 FlowJo 통계값 비교는 데이터 확보 후) |
 | 9. 배포 | Windows `.exe` (PyInstaller) | 더블클릭 실행 | ⬜ |
 | 선택 | tSNE/UMAP, FlowSOM, 세포 주기, 증식 분석 | — | ⬜ |
 
@@ -115,3 +115,26 @@
 | Table Editor | Layout Editor | 출력된 페이지 |
 |---|---|---|
 | ![](docs/images/table_editor.png) | ![](docs/images/layout_editor.png) | ![](docs/images/layout_page.png) |
+
+### 8단계 (검증) — 1차: FlowJo 공개 튜토리얼 데이터
+- 데이터: FlowJo 공식 GitHub 저장소 [FlowJo/FlowJo-VR](https://github.com/FlowJo/FlowJo-VR)의 `8 Color PBMC/Lesson_8.wsp` (FlowJo 10.0) + FCS 35개. `python scripts/fetch_test_data.py --flowjo-vr`로 받음 (약 100MB)
+- 실행: `python scripts/validate_flowjo.py <wsp> <FCS 폴더> --csv 결과.csv` — 워크스페이스에 FlowJo가 저장한 모든 게이트 이벤트 수와 통계값을 CytoGate로 다시 계산해 비교. 결과표: `docs/validation/flowjo_vr_lesson8.csv`
+- 이 워크스페이스에는 FlowJo가 다시 계산하지 않은 오래된 값이 섞여 있음 (서로 다른 파일 A1·C8·C9에 T cells 19,666개로 같은 값). 여러 샘플에서 똑같이 반복되는 값은 비교에서 제외
+
+| 항목 | 비교 수 | 차이 중앙값 | 90% 이내 | 최대 |
+|---|---|---|---|---|
+| 게이트 이벤트 수 | 98 | 0.013% | 0.20% | 0.96% |
+| Median | 41 | 0.06% | 0.48% | 2.3% |
+| Robust CV | 32 | 0.13% | 0.60% | 2.6% |
+| Freq. of Total | 8 | 0.02% | 0.04% | 0.05% |
+
+- 이벤트 수 차이는 게이트 경계 근처 몇 개 이벤트 (예: 22,697 vs 22,695). 이 파일들은 값이 64 단위 격자에 있고 게이트 꼭짓점도 같은 격자에 있는데, 경계선 1 단위 안에 있는 이벤트는 없어서 경계 판정 규칙 문제는 아님. 4096/1024/256 채널 해상도로 판정하는 가설도 시험했지만 일치가 나아지지 않음 → 원인 미확인 (FlowJo 10.0이 격자 값을 조금 흔들어 처리하는 것으로 추정)
+- Median·Robust CV 차이는 대부분 위의 이벤트 수 차이(집단 구성 차이)에서 옴
+- 이전 단계에서 FlowJo 10 워크스페이스(FlowKit 예제)의 이벤트 수는 정확히 일치 확인됨
+- 이번에 고친 것:
+  - FlowJo 10.0 형식(Gating-ML 1.5 네임스페이스) 워크스페이스 읽기
+  - FlowJo가 파라미터 이름의 "/"를 "_"로 바꿔 저장하는 것 (`FITC/Alexa 488-A` → `FITC_Alexa 488-A`) 복원 — 보정·변환·게이트·통계 모두
+  - FlowJo 10 통계 이름(`fj.stat.freqofparent` 등)과 "Freq. of Total"(ancestor="Total") 읽기, FlowJo 10.0은 Freq. of를 비율(0–1)로 저장
+  - FCS 2.0 비트 단위 압축 정수 데이터($PnB 9 등) 읽기 — 해석 방식(앞쪽 비트부터)은 표준 해석이며 실제 기기 파일로는 미검증
+- 사용하지 못한 데이터: LabKey 테스트 데이터(FlowJo 10.8, 통계 다수)는 FCS 내용이 무작위 값으로 바뀌어 있어(개인정보 보호로 추정) 비교 불가. FlowRepository FR-FCM-Z6UG는 사이트 인증서 만료로 다운로드 불가
+- 남은 일: 최신 FlowJo(10.8 이상)가 계산한 Median/Mean/CV/Geo. Mean/SD 값과 원본 FCS가 함께 있는 데이터로 FlowJo 방식(4096칸) 통계 비교
