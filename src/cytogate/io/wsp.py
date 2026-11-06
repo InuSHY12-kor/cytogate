@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlparse
 
 from ..core.compensation import Compensation
 from ..core.gating import BooleanGate, EllipseGate, GatingTree, PolygonGate, RectangleGate
+from ..core.stats import PARAMETER_STATS, Stat, StatSpec
 from ..core.transforms import NS, Transform, from_xml
 
 __all__ = ["WspSample", "Workspace", "read_wsp"]
@@ -91,11 +92,46 @@ def parse_gate(gate_el: ET.Element):
     raise ValueError(f"unsupported FlowJo gate type {kind!r}")
 
 
+# FlowJo statistic names <-> ours
+_FJ_STATS = {
+    "Count": Stat.COUNT, "Freq. of Parent": Stat.FREQ_PARENT, "Freq. of Grandparent": Stat.FREQ_GRANDPARENT,
+    "Freq. of Total": Stat.FREQ_TOTAL, "Freq. of": Stat.FREQ_OF, "Mean": Stat.MEAN, "Median": Stat.MEDIAN,
+    "Geom. Mean": Stat.GEOMEAN, "Geometric Mean": Stat.GEOMEAN, "Mode": Stat.MODE, "SD": Stat.SD, "CV": Stat.CV,
+    "Robust SD": Stat.ROBUST_SD, "Robust CV": Stat.ROBUST_CV, "Median Abs Dev": Stat.MAD, "MADP": Stat.MADP,
+    "Percentile": Stat.PERCENTILE,
+}
+# FlowJo stores label offsets in graph pixels (256 per axis); we keep display units
+ANNO_SCALE = 256.0
+
+
+def parse_statistic(el: ET.Element) -> StatSpec | None:
+    stat = _FJ_STATS.get(el.get("name", ""))
+    if stat is None:
+        return None
+    try:
+        anc = el.get("ancestor") or ""
+        return StatSpec(
+            stat,
+            el.get("id") or None if stat in PARAMETER_STATS else None,
+            float(el.get("percent")) if stat == Stat.PERCENTILE and el.get("percent") else None,
+            tuple(p for p in anc.split("/") if p) if stat == Stat.FREQ_OF else None,
+        )
+    except (ValueError, TypeError):
+        return None
+
+
 def _walk(sub_el: ET.Element, tree: GatingTree, parent_path: tuple, counts: dict) -> None:
+    parent = tree.get(parent_path)
     for el in sub_el:
+        if el.tag == "Statistic":
+            spec = parse_statistic(el)
+            if spec is not None and spec not in parent.stats:
+                parent.stats.append(spec)
+            continue
         if el.tag not in _POP_TAGS:
             continue
         name = el.get("name")
+        gate_el = None
         if el.tag == "Population":
             gate_el = next(iter(el.find("Gate")))
             gate = parse_gate(gate_el)
@@ -106,6 +142,11 @@ def _walk(sub_el: ET.Element, tree: GatingTree, parent_path: tuple, counts: dict
         pop = tree.add(parent_path, name, gate)
         counts[pop.path] = int(el.get("count", "-1"))
         pop.owning_group = el.get("owningGroup") or None
+        if gate_el is not None:
+            ox, oy = float(gate_el.get("annoOffsetX", 0)), float(gate_el.get("annoOffsetY", 0))
+            pop.label_offset = (ox / ANNO_SCALE, oy / ANNO_SCALE)
+            if gate_el.get("isTinted") == "1":
+                pop.tint = gate_el.get("tint")
         for sp in el.findall("Subpopulations"):
             _walk(sp, tree, pop.path, counts)
 

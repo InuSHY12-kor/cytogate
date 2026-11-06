@@ -21,12 +21,15 @@ from ..core.analysis import AnalyzedSample
 from ..core.history import History
 from ..core.workspace import ALL_SAMPLES, ApplyResult, Workspace
 from ..io import FcsReadError, load_fcs
+from ..io.wsp_load import load_workspace
+from ..io.wsp_write import write_wsp
 from .graph_window import GraphWindow
 from .stat_dialog import StatDialog, format_stat
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 STAT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1  # StatSpec on statistic rows
 POP_MIME = "application/x-cytogate-populations"
+AUTOSAVE_MINUTES = 5
 
 
 def encode_populations(items) -> QtCore.QMimeData:
@@ -115,12 +118,15 @@ class GroupTable(QtWidgets.QTreeWidget):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CytoGate — Workspace")
         self.resize(640, 760)
         self.ws = Workspace()
         self.samples: dict[str, AnalyzedSample] = self.ws.samples  # same dict
         self.graphs: list[GraphWindow] = []
         self.history = History(self.ws)
+        self.path: Path | None = None  # where the workspace is saved
+        self.dirty = False
+        self.extras: dict = {}  # CytoGate-only data saved in the side file (tables, layouts, …)
+        self._build_menu()
 
         bar = self.addToolBar("Workspace")
         bar.setMovable(False)
@@ -156,6 +162,135 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setAcceptDrops(True)
         self.refresh_groups()
         self._sync_undo()
+        self._update_title()
+        self.autosave_timer = QtCore.QTimer(self, interval=AUTOSAVE_MINUTES * 60 * 1000)
+        self.autosave_timer.timeout.connect(self.autosave)
+        self.autosave_timer.start()
+
+    def _build_menu(self) -> None:
+        m = self.menuBar().addMenu("File")
+        for text, slot, key in (("New Workspace", self.new_workspace, "Ctrl+N"),
+                                ("Open Workspace…", self.open_workspace_dialog, "Ctrl+O"),
+                                ("Save", self.save, "Ctrl+S"),
+                                ("Save As…", self.save_as_dialog, "Ctrl+Shift+S")):
+            a = m.addAction(text, slot)
+            a.setShortcut(QtGui.QKeySequence(key))
+        m.addSeparator()
+        m.addAction("Add Samples…", self.add_samples_dialog)
+        m.addAction("Add Folder…", self.add_folder_dialog)
+
+    # --- saving / opening ----------------------------------------------------------------
+    def _update_title(self) -> None:
+        name = self.path.name if self.path else "Untitled"
+        self.setWindowTitle(f"CytoGate — {name}{' *' if self.dirty else ''}")
+
+    def mark_dirty(self) -> None:
+        if not self.dirty:
+            self.dirty = True
+            self._update_title()
+
+    def collect_extras(self) -> dict:
+        """CytoGate-only data to keep in the side file (filled in by the editors)."""
+        return dict(self.extras)
+
+    def save(self, path=None) -> Path | None:
+        path = Path(path) if path else self.path
+        if path is None:
+            return self.save_as_dialog()
+        if path.suffix.lower() != ".wsp":
+            path = path.with_suffix(".wsp")
+        write_wsp(path, self.ws, extras=self.collect_extras())
+        self.path = path
+        self.dirty = False
+        self._update_title()
+        self.statusBar().showMessage(f"Saved {path}")
+        return path
+
+    def save_as_dialog(self) -> Path | None:
+        start = str(self.path or "workspace.wsp")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Workspace", start, "FlowJo workspace (*.wsp)")
+        return self.save(path) if path else None
+
+    def autosave(self) -> Path | None:
+        """Write a backup next to the workspace (or in the home folder if never saved)."""
+        if not self.dirty or not self.samples:
+            return None
+        target = (self.path.with_name(self.path.stem + ".autosave.wsp") if self.path
+                  else Path.home() / "CytoGate-autosave.wsp")
+        try:
+            write_wsp(target, self.ws, extras=self.collect_extras())
+        except OSError:
+            return None
+        self.statusBar().showMessage(f"Auto-saved to {target}")
+        return target
+
+    def ask_locate(self, file_name: str) -> str | None:
+        """Ask where a missing FCS file is now (replaced in tests)."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, f"Locate {file_name}", file_name,
+                                                        "FCS files (*.fcs *.FCS);;All files (*)")
+        return path or None
+
+    def ask_save_changes(self) -> str:
+        """"save" / "discard" / "cancel" before closing or replacing the workspace (replaced in tests)."""
+        r = QtWidgets.QMessageBox.question(
+            self, "CytoGate", "Save changes to this workspace?",
+            QtWidgets.QMessageBox.StandardButton.Save | QtWidgets.QMessageBox.StandardButton.Discard
+            | QtWidgets.QMessageBox.StandardButton.Cancel)
+        return {QtWidgets.QMessageBox.StandardButton.Save: "save",
+                QtWidgets.QMessageBox.StandardButton.Discard: "discard"}.get(r, "cancel")
+
+    def _ok_to_replace(self) -> bool:
+        if not self.dirty or not self.samples:
+            return True
+        choice = self.ask_save_changes()
+        if choice == "save":
+            return self.save() is not None
+        return choice == "discard"
+
+    def _install(self, ws: Workspace, path: Path | None, extras: dict) -> None:
+        self.close_all_graphs()
+        self.ws = ws
+        self.samples = ws.samples
+        self.history = History(ws)
+        self.path = path
+        self.extras = dict(extras)
+        self.tree.clear()
+        for a in ws.samples.values():
+            self._add_sample_item(a)
+            self.refresh_tree(a.name)
+        if self.tree.topLevelItemCount():
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        self.refresh_groups(select=ALL_SAMPLES)
+        self.dirty = False
+        self._sync_undo()
+        self._update_title()
+        self.workspace_replaced()
+
+    def workspace_replaced(self) -> None:
+        """Hook for editors that keep state per workspace."""
+
+    def new_workspace(self) -> bool:
+        if not self._ok_to_replace():
+            return False
+        self._install(Workspace(), None, {})
+        return True
+
+    def open_workspace(self, path) -> list[str]:
+        """Open a .wsp; returns the FCS files that could not be found."""
+        if not self._ok_to_replace():
+            return []
+        opened = load_workspace(path, locate=self.ask_locate)
+        self._install(opened.workspace, Path(path), opened.extras)
+        if opened.missing:
+            QtWidgets.QMessageBox.warning(self, "Missing samples",
+                                          "These FCS files were not found:\n" + "\n".join(opened.missing))
+        self.statusBar().showMessage(f"Opened {path} ({len(self.samples)} samples)")
+        return opened.missing
+
+    def open_workspace_dialog(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Workspace", "", "FlowJo workspace (*.wsp)")
+        if path:
+            self.open_workspace(path)
 
     # --- samples ----------------------------------------------------------
     def add_samples(self, paths) -> list[str]:
@@ -171,10 +306,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     continue
                 if not self.ws.add_sample(a):
                     continue
-                item = QtWidgets.QTreeWidgetItem([a.name, "", f"{a.ps.event_count:,}"])
-                item.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight)
-                item.setData(0, ROLE, (a.name, ()))
-                self.tree.addTopLevelItem(item)
+                self._add_sample_item(a)
+                self.mark_dirty()
         if self.tree.currentItem() is None and self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         if errors:
@@ -182,6 +315,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_groups()
         self.statusBar().showMessage(f"{len(self.samples)} samples")
         return errors
+
+    def _add_sample_item(self, a: AnalyzedSample) -> QtWidgets.QTreeWidgetItem:
+        item = QtWidgets.QTreeWidgetItem([a.name, "", f"{a.ps.event_count:,}"])
+        item.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight)
+        item.setData(0, ROLE, (a.name, ()))
+        self.tree.addTopLevelItem(item)
+        return item
 
     def add_samples_dialog(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Add Samples", "", "FCS files (*.fcs *.FCS);;All files (*)")
@@ -232,12 +372,14 @@ class MainWindow(QtWidgets.QMainWindow):
         """Remember the state before a change, for Undo."""
         self.history.record()
         self._sync_undo()
+        self.mark_dirty()
 
     def _sync_undo(self) -> None:
         self.undo_action.setEnabled(self.history.can_undo)
         self.redo_action.setEnabled(self.history.can_redo)
 
     def _after_history(self, names) -> list[str]:
+        self.mark_dirty()
         self.refresh_groups()
         self.data_changed(names)
         self._sync_undo()
@@ -523,6 +665,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return {whole: "group", one: "sample"}.get(box.clickedButton())
 
     def closeEvent(self, e):
+        if not self._ok_to_replace():
+            e.ignore()
+            return
         for g in list(self.graphs):
             g.close()
         super().closeEvent(e)

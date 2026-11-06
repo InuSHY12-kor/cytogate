@@ -32,6 +32,7 @@ def release(w):
     """Close a workspace window and free its sample data (each holds ~160 MB)."""
     import gc
     w.close_all_graphs()
+    w.dirty = False  # don't ask to save
     w.close()
     w.ws.samples.clear()
     w.history._undo.clear()

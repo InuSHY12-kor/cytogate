@@ -15,6 +15,7 @@ class AnalyzedSample:
     def __init__(self, ps: ProcessedSample, gates: GatingTree | None = None):
         self.ps = ps
         self.gates = gates or GatingTree()
+        self.user_keywords: dict[str, str] = {}  # keywords added/edited in the workspace
         self._masks: dict[tuple[str, ...], np.ndarray] | None = None
 
     @property
