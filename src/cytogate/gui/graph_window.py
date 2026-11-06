@@ -22,10 +22,12 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core import EllipseGate, PolygonGate, RectangleGate, default_transform, quadrant_gates
+from ..core.advanced_gates import (QUAD_ORDER, bisector_gates, curly_quadrant_gates, offset_quadrant_gates,
+                                   spider_gates)
 from ..core.analysis import AnalyzedSample
 from ..core.gating import move_vertex, scale_gate, translate_gate
 from ..plots import HistogramY, PlotType
-from .gate_tools import TOOLS
+from .gate_tools import HISTOGRAM_TOOLS, TOOLS
 from .plot_view import IMAGE_FORMATS, PlotView
 from .stat_dialog import format_stat
 from .transform_dialog import starter_transform
@@ -681,6 +683,7 @@ class GraphWindow(QtWidgets.QWidget):
              for c in children if c.gate.dims],
             on_label_moved=self.label_moved, on_gate_moved=self.gate_moved,
             active=self.active, on_select=self.select_gate, on_vertex_moved=self.vertex_moved)
+        self._quad_handles()
         self._edge_warning(mask)
         n = a.count(self.path)
         if self.path:
@@ -800,7 +803,7 @@ class GraphWindow(QtWidgets.QWidget):
     def _sync_tools(self, *_) -> None:
         hist = self.y is None
         for tool, act in self.tool_actions.items():
-            ok = (tool == "Range") == hist
+            ok = (tool in HISTOGRAM_TOOLS) == hist
             act.setEnabled(ok)
             if not ok and act.isChecked():
                 act.setChecked(False)
@@ -835,6 +838,20 @@ class GraphWindow(QtWidgets.QWidget):
             self.main.record()
             made = [a.add_gate(parent, a.unique_name(parent, qname), gate).path
                     for qname, gate in quadrant_gates(x, y, to_x(qx), to_y(qy), xs.stain or xs.name, ys.stain or ys.name)]
+            self.main.data_changed([a.name])
+            return made
+        if tool in ("Spider", "Curly Quad", "Bisector"):
+            (px, py), = pts
+            xs = ps.parameter(x)
+            if tool == "Bisector":
+                made_gates = bisector_gates(x, to_x(px), xs.stain or xs.name)
+            else:
+                ys = ps.parameter(y)
+                maker = spider_gates if tool == "Spider" else curly_quadrant_gates
+                made_gates = maker(x, y, ps.transforms[x], ps.transforms[y], (px, py),
+                                   x_name=xs.stain or xs.name, y_name=ys.stain or ys.name)
+            self.main.record()
+            made = [a.add_gate(parent, a.unique_name(parent, n), g).path for n, g in made_gates]
             self.main.data_changed([a.name])
             return made
         if tool == "Range":
@@ -919,6 +936,74 @@ class GraphWindow(QtWidgets.QWidget):
             deltas[a.ps.parameter(self.y).name] = dy
         self.active = key
         return self._change_gate(key, translate_gate(a.gates.get(path).gate, a.ps, deltas))
+
+    # quadrant arms (offset quadrants) ------------------------------------------------------
+    def quad_set(self):
+        """If the active gate belongs to a rectangle quadrant on these axes:
+        ({"Q1": path, …}, splits dict in data units)."""
+        pop = self.active_population()
+        if pop is None or not isinstance(pop.gate, RectangleGate) or pop.name[:3] not in {f"{q}:" for q in QUAD_ORDER}:
+            return None
+        sibs = {c.name[:2]: c for c in pop.parent.children if c.name[:3] in {f"{q}:" for q in QUAD_ORDER}
+                and isinstance(c.gate, RectangleGate) and len(c.gate.dims) == 2}
+        if set(sibs) != set(QUAD_ORDER) or self.y is None:
+            return None
+        ps = self.analysis.ps
+        if tuple(ps.parameter(d).name for d in sibs["Q2"].gate.dims) != (ps.parameter(self.x).name, ps.parameter(self.y).name):
+            return None
+        q1, q2, q3, q4 = (sibs[q].gate for q in QUAD_ORDER)
+        splits = {"x_upper": q2.mins[0], "x_lower": q3.mins[0], "y_left": q1.mins[1], "y_right": q2.mins[1]}
+        if None in splits.values():
+            return None
+        return {q: sibs[q].path for q in QUAD_ORDER}, splits
+
+    def _quad_handles(self) -> None:
+        found = self.quad_set()
+        if found is None:
+            return
+        _, sp = found
+        ps = self.analysis.ps
+        fx = lambda v: float(ps.transforms[self.x].apply([v])[0])  # noqa: E731
+        fy = lambda v: float(ps.transforms[self.y].apply([v])[0])  # noqa: E731
+        pts = [(fx(sp["x_upper"]), fy(sp["y_left"])),  # 0 centre
+               (fx(sp["x_upper"]), 0.97), (fx(sp["x_lower"]), 0.03),  # 1 top arm, 2 bottom arm
+               (0.03, fy(sp["y_left"])), (0.97, fy(sp["y_right"]))]  # 3 left arm, 4 right arm
+        self.view.add_handles(pts, self.quad_arm_moved)
+
+    def quad_arm_moved(self, index: int, pos) -> list[str]:
+        """Drag the centre (moves the quadrant) or one arm (offsets that half of
+        the divider; the other direction is straightened, as in FlowJo)."""
+        found = self.quad_set()
+        if found is None:
+            return []
+        paths, sp = found
+        ps = self.analysis.ps
+        vx = float(ps.transforms[self.x].inverse([pos[0]])[0])
+        vy = float(ps.transforms[self.y].inverse([pos[1]])[0])
+        if index == 0:
+            sp = {"x_upper": vx, "x_lower": vx, "y_left": vy, "y_right": vy}
+        elif index in (1, 2):
+            sp["x_upper" if index == 1 else "x_lower"] = vx
+            sp["y_right"] = sp["y_left"]
+        else:
+            sp["y_left" if index == 3 else "y_right"] = vy
+            sp["x_lower"] = sp["x_upper"]
+        new = dict(zip(QUAD_ORDER, (g for _, g in offset_quadrant_gates(self.x, self.y, **sp))))
+        first = paths["Q1"]
+        linked = self.main.ws.linked_samples(self.sample_name, first)
+        whole = True
+        if len(linked) > 1:
+            scope = self.main.ask_scope(self.active_population().owning_group, len(linked))
+            if scope is None:
+                self.redraw()
+                return []
+            whole = scope == "group"
+        self.main.record()
+        changed = set()
+        for q in QUAD_ORDER:
+            changed.update(self.main.ws.update_gate(self.sample_name, paths[q], new[q], whole_group=whole))
+        self.main.data_changed(sorted(changed))
+        return sorted(changed)
 
     def vertex_moved(self, key, index: int, pos) -> list[str]:
         name, path = key

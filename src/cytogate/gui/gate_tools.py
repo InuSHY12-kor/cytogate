@@ -16,7 +16,9 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore
 
-TOOLS = ("Rectangle", "Polygon", "Ellipse", "Quadrant", "Range")
+TOOLS = ("Rectangle", "Polygon", "Ellipse", "Quadrant", "Spider", "Curly Quad", "Range", "Bisector")
+CLICK_TOOLS = ("Quadrant", "Spider", "Curly Quad", "Bisector")  # one click places the gate
+HISTOGRAM_TOOLS = ("Range", "Bisector")
 PREVIEW_PEN = pg.mkPen((220, 0, 0), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
 CLOSE_DISTANCE = 0.015  # display units
 
@@ -85,12 +87,12 @@ class GateViewBox(pg.ViewBox):
 
     # --- clicks: polygon, quadrant ---------------------------------------------
     def mouseClickEvent(self, ev):
-        if self.tool not in ("Polygon", "Quadrant") or ev.button() != QtCore.Qt.MouseButton.LeftButton:
+        if self.tool not in ("Polygon", *CLICK_TOOLS) or ev.button() != QtCore.Qt.MouseButton.LeftButton:
             return super().mouseClickEvent(ev)
         ev.accept()
         p = _clip(self.mapSceneToView(ev.scenePos()))
-        if self.tool == "Quadrant":
-            self.shapeDrawn.emit("Quadrant", [p])
+        if self.tool in CLICK_TOOLS:
+            self.shapeDrawn.emit(self.tool, [p])
             return
         self.add_polygon_point(p, close=ev.double())
 

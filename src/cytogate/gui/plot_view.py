@@ -358,6 +358,16 @@ class PlotView(QtWidgets.QWidget):
             drawn.append(name)
         return drawn
 
+    def add_handles(self, points, on_moved, y_scale: float = 1.0) -> list["GateHandle"]:
+        """Extra drag handles (display units); on_moved(index, (x, y))."""
+        out = []
+        for i, p in enumerate(points):
+            h = GateHandle(i, p, self.viewbox, y_scale, on_moved)
+            self.plot.addItem(h, ignoreBounds=True)
+            self.gate_items.append(h)
+            out.append(h)
+        return out
+
     def gate_labels(self) -> list["GateLabel"]:
         return [i for i in self.gate_items if isinstance(i, GateLabel)]
 

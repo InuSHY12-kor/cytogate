@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core import ProcessedSample
@@ -236,6 +238,13 @@ class MainWindow(QtWidgets.QMainWindow):
         k.addAction("Paste Keywords from Spreadsheet", lambda: self.paste_keywords(QtWidgets.QApplication.clipboard().text()))
         k.addSeparator()
         k.addAction("Show Keyword Columns…", self.keyword_columns_dialog)
+        b = self.menuBar().addMenu("Gates")
+        b.addAction("Make AND Gate", lambda: self.make_boolean("and"))
+        b.addAction("Make OR Gate", lambda: self.make_boolean("or"))
+        b.addAction("Make NOT Gate", lambda: self.make_boolean("not"))
+        b.addAction("Boolean Combinations", self.make_combinations)
+        b.addSeparator()
+        b.addAction("BifurGate (auto bisector gates)", self.bifurgate)
         c = self.menuBar().addMenu("Compensation")
         c.addAction("Compensation Matrix Editor…", self.compensation_dialog)
         c.addAction("Remove Compensation (selected samples)",
@@ -554,6 +563,115 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.keywords_changed.connect(lambda changes: [self.set_keyword([name], k, v) for k, v in changes.items()])
         dlg.show()
         return dlg
+
+    # --- Boolean gates and BifurGate -----------------------------------------------------------
+    def _selected_paths(self) -> tuple[str, list[tuple[str, ...]]] | None:
+        pops = [(n, p) for n, p in self.populations_of(self.tree.selectedItems()) if p]
+        if not pops or len({n for n, _ in pops}) != 1:
+            self.statusBar().showMessage("Select populations of one sample.")
+            return None
+        return pops[0][0], [p for _, p in pops]
+
+    @staticmethod
+    def _common_parent(paths) -> tuple[str, ...]:
+        parents = [p[:-1] for p in paths]
+        common = parents[0]
+        for p in parents[1:]:
+            i = 0
+            while i < min(len(common), len(p)) and common[i] == p[i]:
+                i += 1
+            common = common[:i]
+        return common
+
+    def make_boolean(self, op: str, sample: str | None = None, paths=None) -> tuple[str, ...] | None:
+        """AND / OR of the selected populations, or NOT of one, placed under their
+        common parent (FlowJo names: "A & B", "A or B", "NOT A")."""
+        from ..core.gating import BooleanGate
+        if paths is None:
+            sel = self._selected_paths()
+            if sel is None:
+                return None
+            sample, paths = sel
+        paths = [tuple(p) for p in paths]
+        if (op == "not") != (len(paths) == 1) or not paths:
+            self.statusBar().showMessage("AND/OR need two or more populations; NOT needs one.")
+            return None
+        a = self.samples[sample]
+        names = [p[-1] for p in paths]
+        name = {"and": " & ".join(names), "or": " or ".join(names), "not": f"NOT {names[0]}"}[op]
+        parent = self._common_parent(paths)
+        self.record()
+        pop = a.add_gate(parent, a.unique_name(parent, name), BooleanGate(op, tuple(paths)))
+        self.data_changed([sample])
+        return pop.path
+
+    def make_combinations(self, sample: str | None = None, paths=None) -> list[tuple[str, ...]]:
+        """Every +/- combination of the selected populations (FlowJo's Boolean
+        combination gates), as AND gates of the populations and NOT gates of them."""
+        from ..core.advanced_gates import boolean_combination_names
+        from ..core.gating import BooleanGate
+        if paths is None:
+            sel = self._selected_paths()
+            if sel is None:
+                return []
+            sample, paths = sel
+        paths = [tuple(p) for p in paths]
+        if len(paths) < 2:
+            return []
+        a = self.samples[sample]
+        parent = self._common_parent(paths)
+        self.record()
+        negs = []
+        for p in paths:
+            neg = p[:-1] + (f"NOT {p[-1]}",)
+            if neg not in a.gates.paths():
+                a.add_gate(p[:-1], neg[-1], BooleanGate("not", (p,)))
+            negs.append(neg)
+        made = []
+        for name, signs in boolean_combination_names([p[-1] for p in paths]):
+            refs = tuple(p if s else n for p, n, s in zip(paths, negs, signs))
+            made.append(a.add_gate(parent, a.unique_name(parent, name), BooleanGate("and", refs)).path)
+        self.data_changed([sample])
+        return made
+
+    def bifurgate(self, sample: str | None = None, path=None) -> list[tuple[str, ...]]:
+        """Bisector gates on every fluorescence parameter (compensated when
+        available) not already gated above this population, split at the dip
+        between its two main peaks."""
+        from ..core.advanced_gates import bisector_gates, find_split
+        if sample is None:
+            a, path = self.selection()
+            if a is None:
+                return []
+            sample = a.name
+        a = self.samples[sample]
+        path = tuple(path or ())
+        used = set()
+        node = a.gates.get(path)
+        while node is not None and node.gate is not None:
+            used.update(a.ps.parameter(d).name for d in node.gate.dims)
+            node = node.parent
+        comp = a.ps.compensation
+        params = [p for p in a.ps.parameters if p.kind == "fluorescence"
+                  and (p.compensated or comp is None or p.name not in comp.detectors) and p.name not in used]
+        mask = a.mask(path)
+        plans = []
+        for p in params:
+            split = find_split(np.clip(a.ps.scaled(p.name)[mask], 0, 1))
+            if split is not None:
+                value = float(a.ps.transforms[p.name].inverse([split])[0])
+                plans.append(bisector_gates(p.name, value, p.stain or p.name))
+        if not plans:
+            self.statusBar().showMessage("BifurGate: no bimodal parameters found")
+            return []
+        self.record()
+        made = []
+        for gates in plans:
+            for name, g in gates:
+                made.append(a.add_gate(path, a.unique_name(path, name), g).path)
+        self.data_changed([sample])
+        self.statusBar().showMessage(f"BifurGate: split {len(plans)} parameter(s)")
+        return made
 
     # --- compensation and transforms -----------------------------------------------------
     def compensation_dialog(self, show: bool = True):
