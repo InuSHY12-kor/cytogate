@@ -70,6 +70,14 @@ def main() -> None:
     app.processEvents()
     win.grab().save(str(OUT / "gating_quadrants.png"))
     print("saved gating_quadrants")
+    # statistics under CD3+ and a gate label dragged off the data
+    from cytogate.core.stats import Stat, StatSpec
+    a = win.samples[e01]
+    for spec in (StatSpec(Stat.MEDIAN, "Comp-CD4 PE-Cy7 FLR-A"), StatSpec(Stat.GEOMEAN, "Comp-CD8 PerCP-Cy55 FLR-A"),
+                 StatSpec(Stat.ROBUST_CV, "Comp-CD4 PE-Cy7 FLR-A")):
+        a.add_stat(("Lymphocytes", "CD3+"), spec)
+    a.gates.get(("Lymphocytes", "CD3+")).label_offset = (0.05, 0.3)
+    win.refresh_tree(e01)
     win.select(e01, ("Lymphocytes",))
     win.x_box.setCurrentIndex(win.x_box.findData("Comp-CD3 APC-H7 FLR-A"))
     win.y_box.setCurrentIndex(win.y_box.findData("SSC-A"))

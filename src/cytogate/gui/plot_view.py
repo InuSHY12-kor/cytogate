@@ -71,6 +71,53 @@ def _contour_paths(dens: np.ndarray, levels: np.ndarray) -> tuple[np.ndarray, np
     return np.concatenate(xs), np.concatenate(ys)
 
 
+class GateLabel(pg.TextItem):
+    """Gate name + frequency that the user can drag anywhere on the plot.
+
+    Drag with the left button to move it; double-click to put it back.
+    Ignored while a gate tool is active, so drawing over a label still works.
+    """
+
+    def __init__(self, text, anchor, base, offset, y_scale, viewbox, on_moved):
+        super().__init__(text, color=(0, 0, 0), anchor=anchor)
+        self.base = np.array(base, dtype=float)
+        self.y_scale = y_scale  # view units per display unit on y (histogram counts)
+        self.offset = np.array(offset, dtype=float)
+        self.vb = viewbox
+        self.on_moved = on_moved
+        self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        self._apply()
+
+    def _apply(self):
+        self.setPos(float(self.base[0] + self.offset[0]), float(self.base[1] + self.offset[1] * self.y_scale))
+
+    def _movable(self) -> bool:
+        return self.vb.tool is None and self.on_moved is not None
+
+    def mouseDragEvent(self, ev):
+        if ev.button() != QtCore.Qt.MouseButton.LeftButton or not self._movable():
+            ev.ignore()
+            return
+        ev.accept()
+        if ev.isStart():
+            self._start = self.offset.copy()
+        p0 = self.vb.mapSceneToView(ev.buttonDownScenePos())
+        p1 = self.vb.mapSceneToView(ev.scenePos())
+        self.offset = self._start + np.array([p1.x() - p0.x(), (p1.y() - p0.y()) / self.y_scale])
+        self._apply()
+        if ev.isFinish():
+            self.on_moved((float(self.offset[0]), float(self.offset[1])))
+
+    def mouseClickEvent(self, ev):
+        if ev.double() and self._movable():
+            ev.accept()
+            self.offset = np.zeros(2)
+            self._apply()
+            self.on_moved((0.0, 0.0))
+        else:
+            ev.ignore()
+
+
 class PlotView(QtWidgets.QWidget):
     """Shows a ProcessedSample as one of the PlotType kinds."""
 
@@ -111,13 +158,17 @@ class PlotView(QtWidgets.QWidget):
             self.plot.removeItem(item)
         self.gate_items = []
 
-    def show_gates(self, ps: ProcessedSample, x: str, y: str | None, gates) -> list[str]:
-        """Outline child gates that use these axes. `gates` = [(name, gate, freq %)].
-        Returns the names drawn."""
+    def show_gates(self, ps: ProcessedSample, x: str, y: str | None, gates, on_label_moved=None) -> list[str]:
+        """Outline child gates that use these axes.
+
+        `gates` = [(name, gate, freq %, label offset, key)]. Labels can be dragged
+        with the mouse (when no gate tool is active); `on_label_moved(key, offset)`
+        is called with the new offset. Returns the names drawn.
+        """
         self.clear_gates()
         drawn = []
         top = self.plot.getViewBox().viewRange()[1][1] if y is None else 1.0
-        for name, gate, freq in gates:
+        for name, gate, freq, offset, key in gates:
             pts = gate_outline(gate, ps, x, y)
             if pts is None:
                 continue
@@ -128,20 +179,24 @@ class PlotView(QtWidgets.QWidget):
             if quad and y is not None:
                 # FlowJo puts quadrant numbers in the outer corners
                 corner = {"Q1": (0, 1), "Q2": (1, 1), "Q3": (1, 0), "Q4": (0, 0)}[quad.group(1)]
-                label = pg.TextItem(f"{quad.group(1)}\n{freq:.3g}", color=(0, 0, 0),
-                                    anchor=(corner[0], 1 - corner[1]))
-                label.setPos(0.01 + 0.98 * corner[0], 0.01 + 0.98 * corner[1])
+                text, anchor = f"{quad.group(1)}\n{freq:.3g}", (corner[0], 1 - corner[1])
+                base = (0.01 + 0.98 * corner[0], 0.01 + 0.98 * corner[1])
             else:
-                label = pg.TextItem(f"{name}\n{freq:.3g}", color=(0, 0, 0), anchor=(0.5, 0.5))
+                text, anchor = f"{name}\n{freq:.3g}", (0.5, 0.5)
                 cx = float(np.clip((pts[:, 0].min() + pts[:, 0].max()) / 2, 0.05, 0.95))
                 cy = float((pts[:, 1].min() + pts[:, 1].max()) / 2)
-                label.setPos(cx, cy if y is None else float(np.clip(cy, 0.05, 0.95)))
+                base = (cx, cy if y is None else float(np.clip(cy, 0.05, 0.95)))
+            label = GateLabel(text, anchor, base, offset, top, self.viewbox,
+                              (lambda off, k=key: on_label_moved(k, off)) if on_label_moved else None)
             for item in (curve, label):
                 item.setZValue(20)
                 self.plot.addItem(item, ignoreBounds=True)
                 self.gate_items.append(item)
             drawn.append(name)
         return drawn
+
+    def gate_labels(self) -> list["GateLabel"]:
+        return [i for i in self.gate_items if isinstance(i, GateLabel)]
 
     def show_sample(
         self,

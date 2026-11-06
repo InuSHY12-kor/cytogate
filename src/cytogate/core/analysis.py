@@ -6,6 +6,7 @@ import numpy as np
 
 from .gating import Gate, GatingTree, Population
 from .processing import ProcessedSample
+from .stats import GeoMean, StatSpec, compute
 
 __all__ = ["AnalyzedSample"]
 
@@ -43,6 +44,17 @@ class AnalyzedSample:
             return 100.0
         parent = self.count(path[:-1])
         return 100.0 * self.count(path) / parent if parent else 0.0
+
+    def stat(self, path, spec: StatSpec, geomean: GeoMean = GeoMean.GRAPH) -> float:
+        return compute(self, path, spec, geomean)
+
+    def add_stat(self, path, spec: StatSpec) -> None:
+        pop = self.gates.get(path)
+        if spec not in pop.stats:
+            pop.stats.append(spec)
+
+    def remove_stat(self, path, spec: StatSpec) -> None:
+        self.gates.get(path).stats.remove(spec)
 
     def add_gate(self, parent_path, name: str, gate: Gate) -> Population:
         pop = self.gates.add(parent_path, name, gate)

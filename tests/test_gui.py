@@ -221,3 +221,134 @@ def test_mouse_drag_draws_rectangle(gw, app):
     gate = gw.samples[E01].gates.get(("Rectangle",)).gate
     lo = gw.samples[E01].ps.transforms["FSC-A"].apply(np.array([gate.mins[0]]))[0]
     assert lo == pytest.approx(0.2, abs=0.02)
+
+
+# --- draggable gate labels ---------------------------------------------------------
+
+def _mouse(vp, kind, pt, button, buttons):
+    from PySide6 import QtCore, QtGui
+    pos = QtCore.QPointF(pt)
+    ev = QtGui.QMouseEvent(kind, pos, pos, vp.mapToGlobal(pos), button, buttons, QtCore.Qt.KeyboardModifier.NoModifier)
+    QtWidgets.QApplication.sendEvent(vp, ev)
+
+
+def _drag(view, vb, start_view, end_view, app):
+    from PySide6 import QtCore
+    to_w = lambda x, y: QtCore.QPointF(view.mapFromScene(vb.mapViewToScene(QtCore.QPointF(x, y))))  # noqa: E731
+    p0, p1 = to_w(*start_view), to_w(*end_view)
+    vp = view.viewport()
+    L, N, T = QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton, QtCore.QEvent.Type
+    _mouse(vp, T.MouseButtonPress, p0, L, L)
+    for t in np.linspace(0, 1, 10)[1:]:
+        _mouse(vp, T.MouseMove, p0 + (p1 - p0) * float(t), N, L)
+    _mouse(vp, T.MouseButtonRelease, p1, L, N)
+    app.processEvents()
+
+
+def test_drag_gate_label(gw, app):
+    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    app.processEvents()
+    [label] = gw.view.gate_labels()
+    start = (label.pos().x(), label.pos().y())
+    _drag(gw.view.plot, gw.view.viewbox, start, (start[0] + 0.25, start[1] + 0.4), app)
+    pop = gw.samples[E01].gates.get(("Rectangle",))
+    assert pop.label_offset == pytest.approx((0.25, 0.4), abs=0.02)
+    # the gate itself did not move
+    assert pop.gate.mins[0] == pytest.approx(float(gw.samples[E01].ps.transforms["FSC-A"].inverse([0.2])[0]))
+    # position is kept when the plot is redrawn
+    gw.redraw()
+    [label] = gw.view.gate_labels()
+    assert label.pos().x() == pytest.approx(start[0] + 0.25, abs=0.02)
+
+
+def test_label_drag_ignored_while_drawing(gw, app):
+    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    gw.tool_actions["Rectangle"].trigger()
+    app.processEvents()
+    [label] = gw.view.gate_labels()
+    start = (label.pos().x(), label.pos().y())
+    _drag(gw.view.plot, gw.view.viewbox, start, (start[0] + 0.2, start[1] + 0.3), app)
+    a = gw.samples[E01]
+    assert a.gates.get(("Rectangle",)).label_offset == (0.0, 0.0)
+    assert ("Rectangle 2",) in a.gates.paths()  # the drag drew a new gate instead
+
+
+def test_label_double_click_resets(gw, app):
+    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    pop = gw.samples[E01].gates.get(("Rectangle",))
+    pop.label_offset = (0.3, 0.3)
+    gw.redraw()
+    [label] = gw.view.gate_labels()
+
+    class Ev:
+        def double(self):
+            return True
+
+        def accept(self):
+            pass
+
+        def ignore(self):
+            pass
+
+    label.mouseClickEvent(Ev())
+    assert pop.label_offset == (0.0, 0.0)
+
+
+def test_drag_histogram_label(gw, app):
+    gw.x_box.setCurrentIndex(gw.x_box.findData("Comp-CD3 APC-H7 FLR-A"))
+    gw.y_box.setCurrentIndex(gw.y_box.findText(HISTOGRAM_CHOICE))
+    gw.shape_drawn("Range", [(0.55, 0.0), (0.9, 0.0)])
+    app.processEvents()
+    [label] = gw.view.gate_labels()
+    top = gw.view.viewbox.viewRange()[1][1]
+    start = (label.pos().x(), label.pos().y())
+    _drag(gw.view.plot, gw.view.viewbox, start, (start[0] - 0.2, start[1] + 0.2 * top), app)
+    off = gw.samples[E01].gates.get(("Range",)).label_offset
+    assert off == pytest.approx((-0.2, 0.2), abs=0.03)
+
+
+# --- statistics (phase 5) --------------------------------------------------------
+
+def test_add_and_delete_statistic(gw, monkeypatch):
+    from cytogate.core.stats import Stat, StatSpec
+
+    gw.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
+    gw.select(E01, ("Rectangle",))
+    spec = StatSpec(Stat.MEDIAN, "Comp-CD3 APC-H7 FLR-A")
+    monkeypatch.setattr(gw, "ask_stat", lambda a: spec)
+    gw.add_stat_dialog()
+    pop_item = gw.find_item(E01, ("Rectangle",))
+    stat_rows = [pop_item.child(i) for i in range(pop_item.childCount()) if pop_item.child(i).text(0).startswith("Σ")]
+    assert [r.text(0) for r in stat_rows] == ["Σ Median : Comp-CD3 APC-H7 FLR-A"]
+    a = gw.samples[E01]
+    assert stat_rows[0].text(1) == f"{a.stat(('Rectangle',), spec):.0f}"
+    # selecting the statistic plots its population; Delete removes only the statistic
+    gw.tree.setCurrentItem(stat_rows[0])
+    assert gw.selection()[1] == ("Rectangle",)
+    gw.delete_selected_gate()
+    assert a.gates.get(("Rectangle",)).stats == []
+    assert ("Rectangle",) in a.gates.paths()
+
+
+def test_statistic_on_sample_root(gw, monkeypatch):
+    from cytogate.core.stats import Stat, StatSpec
+
+    monkeypatch.setattr(gw, "ask_stat", lambda a: StatSpec(Stat.COUNT))
+    gw.select(E01)
+    gw.add_stat_dialog()
+    top = gw.sample_item(E01)
+    assert top.child(0).text(0) == "Σ Count" and top.child(0).text(1) == "290,172"
+
+
+def test_stat_dialog(app):
+    from cytogate.core.stats import Stat
+    from cytogate.gui.stat_dialog import StatDialog
+
+    dlg = StatDialog([("FSC-A", "FSC-A"), ("Comp-R780-A", "Comp-R780-A :: CD3")])
+    dlg.stat_box.setCurrentIndex(dlg.stat_box.findData(Stat.FREQ_PARENT))
+    assert not dlg.param_box.isEnabled() and dlg.spec().parameter is None
+    dlg.stat_box.setCurrentIndex(dlg.stat_box.findData(Stat.PERCENTILE))
+    dlg.param_box.setCurrentIndex(1)
+    dlg.pct_box.setValue(95)
+    s = dlg.spec()
+    assert (s.stat, s.parameter, s.percentile) == (Stat.PERCENTILE, "Comp-R780-A", 95)

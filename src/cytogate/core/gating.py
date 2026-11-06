@@ -219,6 +219,10 @@ class Population:
     gate: Gate | None  # None for the root ("Ungated")
     children: list["Population"] = field(default_factory=list)
     parent: "Population | None" = field(default=None, repr=False, compare=False)
+    # Where the user dragged the gate's label, relative to its default spot, in
+    # display units (x: 0..1 of the axis; y: 0..1 of the plot height).
+    label_offset: tuple[float, float] = (0.0, 0.0)
+    stats: list = field(default_factory=list)  # StatSpec nodes shown under the population
 
     @property
     def path(self) -> tuple[str, ...]:

@@ -17,10 +17,12 @@ from ..io import FcsReadError, load_fcs
 from ..plots import HistogramY, PlotType
 from .gate_tools import TOOLS
 from .plot_view import PlotView
+from .stat_dialog import StatDialog, format_stat
 from .transform_dialog import KINDS, NAMES, TransformDialog, starter_transform
 
 HISTOGRAM_CHOICE = "Histogram"
 ROLE = QtCore.Qt.ItemDataRole.UserRole
+STAT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1  # StatSpec on statistic rows
 DEFAULT_GATE_NAMES = {"Rectangle": "Rectangle", "Polygon": "Polygon", "Ellipse": "Ellipse", "Range": "Range"}
 
 
@@ -34,7 +36,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # workspace tree: samples with their populations (FlowJo-style columns)
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderLabels(["Name", "Statistic", "#Cells"])
-        self.tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2):
+            header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.tree.currentItemChanged.connect(lambda *_: self._selection_changed())
         QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Delete, self.tree, activated=self.delete_selected_gate)
 
@@ -78,7 +84,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tool_actions[tool] = act
         self.tool_group.triggered.connect(self._tool_changed)
         self.gate_bar.addSeparator()
-        self.gate_bar.addAction("Delete Gate", self.delete_selected_gate)
+        self.gate_bar.addAction("Delete", self.delete_selected_gate)
+        self.gate_bar.addSeparator()
+        self.gate_bar.addAction("Add Statistic…", self.add_stat_dialog)
 
         self.view = PlotView()
         self.view.viewbox.shapeDrawn.connect(self.shape_drawn)
@@ -91,7 +99,7 @@ class MainWindow(QtWidgets.QMainWindow):
         split = QtWidgets.QSplitter()
         split.addWidget(self.tree)
         split.addWidget(right)
-        split.setSizes([420, 780])
+        split.setSizes([480, 720])
         self.setCentralWidget(split)
 
         bar = self.addToolBar("Main")
@@ -178,7 +186,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def find_item(self, name: str, path) -> QtWidgets.QTreeWidgetItem:
         item = self.sample_item(name)
         for part in path:
-            item = next(item.child(i) for i in range(item.childCount()) if item.child(i).text(0) == part)
+            item = next(item.child(i) for i in range(item.childCount())
+                        if item.child(i).text(0) == part and item.child(i).data(0, STAT_ROLE) is None)
         return item
 
     def _selection_changed(self):
@@ -216,6 +225,15 @@ class MainWindow(QtWidgets.QMainWindow):
         top = self.sample_item(name)
         top.takeChildren()
 
+        def add_stats(parent_item, pop):
+            for spec in pop.stats:
+                label = a.ps.parameter(spec.parameter).label if spec.parameter else None
+                it = QtWidgets.QTreeWidgetItem(["Σ " + spec.label(label), format_stat(spec.stat, a.stat(pop.path, spec)), ""])
+                it.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight)
+                it.setData(0, ROLE, (name, pop.path))
+                it.setData(0, STAT_ROLE, spec)
+                parent_item.addChild(it)
+
         def add(parent_item, pop):
             n = a.count(pop.path)
             it = QtWidgets.QTreeWidgetItem([pop.name, f"{a.freq_of_parent(pop.path):.3g}", f"{n:,}"])
@@ -223,9 +241,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 it.setTextAlignment(col, QtCore.Qt.AlignmentFlag.AlignRight)
             it.setData(0, ROLE, (name, pop.path))
             parent_item.addChild(it)
+            add_stats(it, pop)
             for c in pop.children:
                 add(it, c)
 
+        add_stats(top, a.gates.root)
         for pop in a.gates.root.children:
             add(top, pop)
         top.setExpanded(True)
@@ -239,9 +259,38 @@ class MainWindow(QtWidgets.QMainWindow):
     def select(self, name: str, path=()) -> None:
         self.tree.setCurrentItem(self.find_item(name, tuple(path)))
 
-    def delete_selected_gate(self):
+    def selected_stat(self):
+        item = self.tree.currentItem()
+        return item.data(0, STAT_ROLE) if item is not None else None
+
+    def ask_stat(self, a: AnalyzedSample):
+        """Show the Add Statistic dialog; returns a StatSpec or None (replaced in tests)."""
+        dlg = StatDialog([(p.name, p.label) for p in a.ps.parameters], self)
+        return dlg.spec() if dlg.exec() else None
+
+    def add_stat_dialog(self):
         a, path = self.selection()
-        if a is None or not path:
+        if a is None:
+            return
+        spec = self.ask_stat(a)
+        if spec is None:
+            return
+        a.add_stat(path, spec)
+        self.refresh_tree(a.name)
+
+    def delete_selected_gate(self):
+        """Delete the selected gate (with its children) or statistic."""
+        a, path = self.selection()
+        if a is None:
+            return
+        spec = self.selected_stat()
+        if spec is not None:
+            a.remove_stat(path, spec)
+            self.tree.setCurrentItem(self.sample_item(a.name))
+            self.refresh_tree(a.name)
+            self.select(a.name, path)
+            return
+        if not path:
             return
         a.remove_gate(path)
         self.tree.setCurrentItem(self.sample_item(a.name))
@@ -370,7 +419,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.show_sample(a.ps, x, y, kind, HistogramY(self.hist_y_box.currentText()),
                               population=population, mask=a.mask(path))
         children = a.gates.get(path).children
-        self.view.show_gates(a.ps, x, y, [(c.name, c.gate, a.freq_of_parent(c.path)) for c in children if c.gate.dims])
+        self.view.show_gates(
+            a.ps, x, y,
+            [(c.name, c.gate, a.freq_of_parent(c.path), c.label_offset, (a.name, c.path)) for c in children if c.gate.dims],
+            on_label_moved=self.label_moved,
+        )
+
+    def label_moved(self, key, offset) -> None:
+        """A gate label was dragged on the plot; remember where."""
+        name, path = key
+        self.samples[name].gates.get(path).label_offset = offset
 
     def export_graph_dialog(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Graph", "graph.png", "PNG image (*.png)")

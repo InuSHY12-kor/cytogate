@@ -14,7 +14,7 @@
 | 2. 보정·변환 | `$SPILLOVER` 보정, Linear / Log / Biex / Logicle / Arcsinh | FlowJo 변환 참조값과 일치 | ✅ |
 | 3. 그래프 | Dot, Pseudocolor, Contour, Density, Histogram | 스크린샷 확인 | ✅ |
 | 4. 게이팅 | Polygon, Rectangle, Ellipse, Quadrant, Range, Boolean, 게이트 트리 | `.wsp` 게이트 이벤트 수 일치 | ✅ (FlowJo 9 변환 파일 예외, 아래 참고) |
-| 5. 통계 | Count, Freq. of Parent/Total/Grandparent, Median, Mean, Geo. Mean, CV, SD, rCV | FlowJo 계산식과 일치 | ⬜ |
+| 5. 통계 | Count, Freq. of Parent/Total/Grandparent, Median, Mean, Geo. Mean, CV, SD, rCV | FlowJo 계산식과 일치 | ✅ (FlowJo 실제 값 비교는 8단계) |
 | 6. 그룹·일괄 적용 | 그룹, 게이트 일괄 적용, 샘플별 조정 | 여러 파일 일괄 처리 | ⬜ |
 | 7. 출력 | Table Editor 형식 CSV/XLSX, `.wsp` 내보내기/불러오기, 그래프 PNG/SVG/PDF, 게이트 이벤트 FCS 내보내기 | FlowJo에서 `.wsp` 열기 | ⬜ |
 | 8. 검증 | 실제 FlowJo 분석 결과와 1:1 수치 비교 | 차이 리포트 | ⬜ |
@@ -57,3 +57,15 @@
 - FlowJo 10에서 만든 작업공간(사분면+자식 게이트, Biex, ArcSinh, 타원 등 6개 파일): **모든 게이트 수치 정확히 일치**
 - FlowJo 9에서 변환된 "DEN" 작업공간: Time은 일치, Singlets 이하에서 Polygon/Rectangle 최대 약 0.3%, Logicle 축의 타원 최대 약 3.2% 차이.
   원인 미확정(FlowKit도 같은 차이). FlowJo의 Logicle 표시 변환이 공식과 다를 가능성이 가장 큼. 8단계에서 FlowJo 10으로 직접 만든 Logicle 작업공간으로 다시 확인 필요
+
+### 5단계 (통계)
+- 통계: Count, Freq. of Parent/Grandparent/Total, Mean, Median, Geometric Mean, Mode, SD, CV, Robust SD, Robust CV, Median Abs Dev, MADP, Percentile
+- 정의는 FlowJo 문서 기준(Robust CV = 100 × ½(P84.13 − P15.87) ÷ Median, MADP = 100 × 1.4826 × MAD ÷ Median 등)
+- Geometric Mean은 FlowJo 10 방식(축 변환 공간에서 평균 후 역변환, 음수 허용)이 기본, 고전식(양수만 exp(mean(ln x)))도 선택 가능
+- 화면: "Add Statistic…"으로 게이트·샘플에 Σ 통계 노드 추가, 트리에 값 표시, Delete로 제거
+- Table Editor 열 이름 형식 준비: `Lymphocytes/CD3+ | Median (Comp-R780-A :: CD3)` (7단계 내보내기에서 사용)
+- **확인 필요:** 예제 `.wsp`에는 FlowJo가 계산한 Count 외의 통계 값이 없어서 수학적 정의로만 검증. FlowJo는 "binned data"로 통계를 계산한다고 문서에 적혀 있어 끝자리가 다를 수 있음 → 8단계에서 실제 FlowJo 표와 비교
+
+### 사용자 요청 기능: 게이트 라벨 끌어서 옮기기
+- 게이트 도구를 끈 상태에서 그래프의 게이트 라벨(이름·비율)을 마우스로 끌면 원하는 위치로 이동, 더블클릭하면 원래 위치로
+- 위치는 게이트마다 저장되어 그래프를 다시 그려도 유지 (히스토그램 포함). 7단계에서 `.wsp`의 `annoOffsetX/Y`로 저장 예정
