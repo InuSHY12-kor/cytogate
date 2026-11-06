@@ -87,7 +87,7 @@ def test_menus(g):
     menus = {m.title(): [a.text() for a in m.actions() if a.text()] for m in g.menu_bar.findChildren(QtWidgets.QMenu)
              if m.title()}
     assert menus["File"] == ["Close", "Close All Graph Windows", "Reset This Graph Window's Size",
-                             "Reset All Graph Windows Size", "Export Graphics As…", "Print…"]
+                             "Reset All Graph Windows Size", "Export Graphics As…", "Print…", "Add to Layout"]
     assert "Copy Histogram Function" in menus["Edit"] and "Undo" in menus["Edit"]
     assert menus["Graph"] == ["Duplicate View", "Transpose Axes", "Manually Enter Gate…"]
     assert menus["Display"] == ["Show Grid", "Draw Large Dots", "Show Gate Frequencies", "Show Gate Names",

@@ -162,6 +162,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.extras: dict = {}  # CytoGate-only data saved in the side file (tables, layouts, …)
         self.tables: list = []  # Table Editor definitions (core.table.TableDef)
         self.table_editors: list = []
+        self.layouts: list = []  # Layout Editor documents (core.layout.Layout)
+        self.layout_editors: list = []
         self._build_menu()
 
         bar = self.addToolBar("Workspace")
@@ -259,6 +261,10 @@ class MainWindow(QtWidgets.QMainWindow):
         t.addAction("New Table…", lambda: self.open_table_editor(None))
         self.tables_menu = t.addMenu("Open Table")
         self.tables_menu.aboutToShow.connect(self._fill_tables_menu)
+        t.addSeparator()
+        t.addAction("New Layout…", lambda: self.open_layout_editor(None))
+        self.layouts_menu = t.addMenu("Open Layout")
+        self.layouts_menu.aboutToShow.connect(self._fill_layouts_menu)
         k.addAction("Sample Properties…", self.sample_properties)
 
     # --- saving / opening ----------------------------------------------------------------
@@ -277,7 +283,68 @@ class MainWindow(QtWidgets.QMainWindow):
         out["keyword_columns"] = list(self.keyword_columns)
         from .table_editor import tables_to_extras
         out["tables"] = tables_to_extras(self.tables)
+        from ..core.layout import layout_to_json
+        out["layouts"] = [layout_to_json(lay) for lay in self.layouts]
         return out
+
+    # --- layouts -----------------------------------------------------------------------
+    def store_layouts(self) -> None:
+        """Called by the Layout Editor whenever a layout changes."""
+        self.mark_dirty()
+
+    def unique_layout_name(self, base: str = "Layout") -> str:
+        import re as _re
+        names = {lay.name for lay in self.layouts}
+        if base not in names:
+            return base
+        stem = _re.sub(r"\s+\d+$", "", base) or "Layout"
+        n = 2
+        while f"{stem} {n}" in names:
+            n += 1
+        return f"{stem} {n}"
+
+    def open_layout_editor(self, layout=None, show: bool = True):
+        from ..core.layout import Layout
+        from .layout_editor import LayoutEditor
+        if layout is None:
+            layout = Layout(name=self.unique_layout_name("Layout 1"))
+        if all(lay is not layout for lay in self.layouts):
+            self.layouts.append(layout)
+            self.mark_dirty()
+        for ed in self.layout_editors:
+            if ed.layout is layout:
+                ed.rebuild()
+                if show:
+                    ed.show()
+                    ed.raise_()
+                return ed
+        ed = LayoutEditor(self, layout)
+        self.layout_editors.append(ed)
+        if show:
+            ed.show()
+            ed.fit_page()
+        return ed
+
+    def add_graph_to_layout(self, sample, path, x, y, plot_type=None, hist_y=None, show: bool = True):
+        """Graph window > File > Add to Layout: into the last layout opened (a new one if none)."""
+        ed = next((e for e in reversed(self.layout_editors) if e.isVisible()), None) or \
+            (self.layout_editors[-1] if self.layout_editors else self.open_layout_editor(None, show=show))
+        it = ed.add_graph(sample, path, x, y, plot_type, hist_y)
+        if show:
+            ed.show()
+            ed.raise_()
+        return ed, it
+
+    def _fill_layouts_menu(self) -> None:
+        self.layouts_menu.clear()
+        for lay in self.layouts:
+            self.layouts_menu.addAction(lay.name, lambda lay=lay: self.open_layout_editor(lay))
+
+    def close_layout_editors(self) -> None:
+        for ed in self.layout_editors:
+            ed.close()
+            ed.deleteLater()
+        self.layout_editors.clear()
 
     # --- tables ------------------------------------------------------------------------
     def store_tables(self) -> None:
@@ -385,6 +452,14 @@ class MainWindow(QtWidgets.QMainWindow):
         from .table_editor import tables_from_extras
         self.close_table_editors()
         self.tables = tables_from_extras(self.extras.pop("tables", []))
+        from ..core.layout import layout_from_json
+        self.close_layout_editors()
+        self.layouts = []
+        for d in self.extras.pop("layouts", []) or []:
+            try:
+                self.layouts.append(layout_from_json(d))
+            except (KeyError, TypeError, ValueError):
+                continue
         self.tree.setColumnCount(3 + len(self.keyword_columns))
         self.tree.setHeaderLabels(["Name", "Statistic", "#Cells", *self.keyword_columns])
         for a in ws.samples.values():
@@ -1251,4 +1326,5 @@ class MainWindow(QtWidgets.QMainWindow):
         for g in list(self.graphs):
             g.close()
         self.close_table_editors()
+        self.close_layout_editors()
         super().closeEvent(e)

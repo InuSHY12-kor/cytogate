@@ -285,6 +285,7 @@ class GraphWindow(QtWidgets.QWidget):
         f.addSeparator()
         A["export"] = self._act(f, "Export Graphics As…", self.export_dialog, "Ctrl+S")
         A["print"] = self._act(f, "Print…", self.print_dialog, "Ctrl+P")
+        A["to_layout"] = self._act(f, "Add to Layout", self.add_to_layout, "Ctrl+L")
         e = mb.addMenu("Edit")
         A["undo"] = self._act(e, "Undo", lambda: self.main.undo(), "Ctrl+Z")
         A["redo"] = self._act(e, "Redo", lambda: self.main.redo(), "Ctrl+Shift+Z")
@@ -703,6 +704,12 @@ class GraphWindow(QtWidgets.QWidget):
         self.show_uncompensated = on
         self._fill_params(self.x, self.y)
         self.redraw()
+
+    def add_to_layout(self, show: bool = True):
+        """This graph (sample, population, axes, plot type) into the Layout Editor."""
+        kind = "Histogram" if self.y is None else self.type_box.currentText()
+        return self.main.add_graph_to_layout(self.sample_name, self.path, self.x, self.y, kind,
+                                             self.hist_y_box.currentText(), show=show)
 
     def redraw(self, *_) -> None:
         a = self.analysis
