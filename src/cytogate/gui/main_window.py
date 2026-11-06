@@ -160,6 +160,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.path: Path | None = None  # where the workspace is saved
         self.dirty = False
         self.extras: dict = {}  # CytoGate-only data saved in the side file (tables, layouts, …)
+        self.tables: list = []  # Table Editor definitions (core.table.TableDef)
+        self.table_editors: list = []
         self._build_menu()
 
         bar = self.addToolBar("Workspace")
@@ -253,6 +255,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     lambda: self.apply_compensation(None, self.selected_sample_names()))
         c.addSeparator()
         c.addAction("Copy Transforms to Current Group", self.copy_transforms_to_group)
+        t = self.menuBar().addMenu("Reports")
+        t.addAction("New Table…", lambda: self.open_table_editor(None))
+        self.tables_menu = t.addMenu("Open Table")
+        self.tables_menu.aboutToShow.connect(self._fill_tables_menu)
         k.addAction("Sample Properties…", self.sample_properties)
 
     # --- saving / opening ----------------------------------------------------------------
@@ -269,7 +275,49 @@ class MainWindow(QtWidgets.QMainWindow):
         """CytoGate-only data to keep in the side file (filled in by the editors)."""
         out = dict(self.extras)
         out["keyword_columns"] = list(self.keyword_columns)
+        from .table_editor import tables_to_extras
+        out["tables"] = tables_to_extras(self.tables)
         return out
+
+    # --- tables ------------------------------------------------------------------------
+    def store_tables(self) -> None:
+        """Called by the Table Editor whenever a definition changes."""
+        self.mark_dirty()
+
+    def open_table_editor(self, table=None, show: bool = True):
+        from ..core.table import TableDef
+        from .table_editor import TableEditor
+        if table is None:
+            names = {t.name for t in self.tables}
+            n = 1
+            while f"Table {n}" in names:
+                n += 1
+            table = TableDef(name=f"Table {n}")
+            self.tables.append(table)
+            self.mark_dirty()
+        for ed in self.table_editors:
+            if ed.table is table:
+                ed.reload_choices()
+                if show:
+                    ed.show()
+                    ed.raise_()
+                return ed
+        ed = TableEditor(self, table)
+        self.table_editors.append(ed)
+        if show:
+            ed.show()
+        return ed
+
+    def _fill_tables_menu(self) -> None:
+        self.tables_menu.clear()
+        for t in self.tables:
+            self.tables_menu.addAction(t.name, lambda t=t: self.open_table_editor(t))
+
+    def close_table_editors(self) -> None:
+        for ed in self.table_editors:
+            ed.close()
+            ed.deleteLater()
+        self.table_editors.clear()
 
     def save(self, path=None) -> Path | None:
         path = Path(path) if path else self.path
@@ -334,6 +382,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.extras = dict(extras)
         self.tree.clear()
         self.keyword_columns = list(self.extras.pop("keyword_columns", []))
+        from .table_editor import tables_from_extras
+        self.close_table_editors()
+        self.tables = tables_from_extras(self.extras.pop("tables", []))
         self.tree.setColumnCount(3 + len(self.keyword_columns))
         self.tree.setHeaderLabels(["Name", "Statistic", "#Cells", *self.keyword_columns])
         for a in ws.samples.values():
@@ -1199,4 +1250,5 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         for g in list(self.graphs):
             g.close()
+        self.close_table_editors()
         super().closeEvent(e)
