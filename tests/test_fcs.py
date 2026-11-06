@@ -79,13 +79,17 @@ def test_channel_types_and_lookup(data_dir):
 
 
 def test_events_equal_raw_file_values(data_dir):
-    """Linear, gain-1 file: events equal the stored values; Time is scaled by $TIMESTEP
-    into seconds, as FlowJo does (its Time gates in the .wsp use these units)."""
+    """Linear, gain-1 file: events equal the stored values; Time is scaled into seconds
+    with FlowJo's gain ($ETIM - $BTIM) / stored time range (checked against the
+    gain FlowJo records, in test_gating.py)."""
     path = data_dir / "8_color_data_set" / "fcs_files" / EIGHT_COLOR[0]
     s = load_fcs(path)
     fd = flowio.FlowData(str(path))
     stored = np.reshape(np.asarray(fd.events, dtype=float), (-1, fd.channel_count))
-    stored[:, s.channel_index("Time")] *= float(s.keyword("$TIMESTEP"))
+    t = s.channel_index("Time")
+    gain = 69.0 / (stored[:, t].max() - stored[:, t].min())  # $BTIM 13:37:39, $ETIM 13:38:48
+    assert s.time_gain == pytest.approx(gain)
+    stored[:, t] *= gain
     np.testing.assert_allclose(s.events, stored, rtol=1e-6)
 
 

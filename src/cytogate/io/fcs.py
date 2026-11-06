@@ -3,6 +3,11 @@
 `load_fcs()` returns an `FcsSample`: keywords exactly as written in the file,
 a channel table, and the event matrix. Event values are the "raw" scale FlowJo
 gates on: FCS data with $PnE log amplification and $PnG gain already applied.
+
+Time is scaled to seconds the way FlowJo does it: when $BTIM and $ETIM are
+present, gain = ($ETIM - $BTIM) / (max - min of the stored time values);
+otherwise gain = $TIMESTEP. (FlowJo records this per-sample gain on the Time
+transform in its .wsp files.)
 """
 
 from __future__ import annotations
@@ -105,6 +110,7 @@ class FcsSample:
         self.keywords = keywords
         self.warnings = warnings_
         self.channels = self._build_channels()
+        self._events: np.ndarray | None = None
 
     # --- identity -------------------------------------------------------
     @property
@@ -188,8 +194,38 @@ class FcsSample:
     # --- events ---------------------------------------------------------
     @property
     def events(self) -> np.ndarray:
-        """Event matrix, shape (event_count, channel_count), raw scale."""
-        return self._fk.get_events(source="raw")
+        """Event matrix, shape (event_count, channel_count), raw scale (Time in seconds)."""
+        if self._events is None:
+            ev = np.array(self._fk.get_events(source="raw"), dtype=float)
+            t = self.time_index
+            if t is not None:
+                ev[:, t] = self._stored_time() * self.time_gain
+            self._events = ev
+        return self._events
+
+    @property
+    def time_index(self) -> int | None:
+        return next((i for i, c in enumerate(self.channels) if c.is_time), None)
+
+    def _stored_time(self) -> np.ndarray:
+        """Time values as stored in the file (FlowKit's raw Time is stored x $TIMESTEP)."""
+        raw = self._fk.get_events(source="raw")[:, self.time_index]
+        step = _float(self.keyword("$TIMESTEP"), 0.0)
+        return raw / step if step > 0 else raw
+
+    @property
+    def time_gain(self) -> float:
+        """Seconds per stored time unit, computed as FlowJo does (see module docstring)."""
+        t = self.time_index
+        if t is None:
+            return 1.0
+        span = _clock_span(self.keyword("$BTIM"), self.keyword("$ETIM"))
+        if span:
+            stored = self._stored_time()
+            rng = float(stored.max() - stored.min()) if stored.size else 0.0
+            if rng > 0:
+                return span / rng
+        return _float(self.keyword("$TIMESTEP"), 1.0)
 
     def channel_events(self, key: str | int) -> np.ndarray:
         return self.events[:, self.channel_index(key)]
@@ -209,6 +245,33 @@ class FcsSample:
 
     def __repr__(self) -> str:
         return f"<FcsSample {self.name!r} FCS{self.version} {self.event_count:,} events × {len(self.channels)} ch>"
+
+
+def _clock_seconds(value: str | None) -> float | None:
+    """hh:mm:ss[.cc] or FCS 3.0 hh:mm:ss:tt (tt = 1/60 s) -> seconds."""
+    if not value:
+        return None
+    parts = value.strip().split(":")
+    try:
+        if len(parts) == 4:
+            h, m, sec, ticks = parts
+            return int(h) * 3600 + int(m) * 60 + float(sec) + float(ticks) / 60
+        if len(parts) == 3:
+            h, m, sec = parts
+            return int(h) * 3600 + int(m) * 60 + float(sec)
+    except ValueError:
+        return None
+    return None
+
+
+def _clock_span(begin: str | None, end: str | None) -> float | None:
+    b, e = _clock_seconds(begin), _clock_seconds(end)
+    if b is None or e is None:
+        return None
+    span = e - b
+    if span < 0:  # acquisition crossed midnight
+        span += 24 * 3600
+    return span or None
 
 
 def _parse_spill(value: str, channels: list[Channel]) -> pd.DataFrame:
