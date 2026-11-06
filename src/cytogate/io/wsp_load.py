@@ -54,6 +54,29 @@ def find_fcs(uri: str, file_name: str, search_dirs) -> Path | None:
     return None
 
 
+def _restore_parameter_names(s, pnn: list[str]) -> None:
+    """FlowJo writes "/" in parameter names as "_" (FITC/Alexa 488-A -> FITC_Alexa 488-A).
+    Map those back to the file's names in the compensation, transforms, gates and statistics."""
+    import dataclasses
+
+    names = set(pnn)
+    base = {p.replace("/", "_"): p for p in pnn if "/" in p and p.replace("/", "_") not in names}
+    if not base:
+        return
+    mapping = dict(base)
+    prefix = s.compensation.prefix if s.compensation is not None else "Comp-"
+    mapping.update({prefix + k: prefix + v for k, v in base.items()})
+    if s.compensation is not None:
+        sp = s.compensation.spillover.rename(index=mapping, columns=mapping)
+        s.compensation = dataclasses.replace(s.compensation, spillover=sp)
+    s.transforms = {mapping.get(k, k): v for k, v in s.transforms.items()}
+    for pop in s.gates:
+        if pop.gate is not None and getattr(pop.gate, "dims", ()):
+            pop.gate = pop.gate.renamed(mapping)
+        pop.stats = [dataclasses.replace(sp, parameter=mapping.get(sp.parameter, sp.parameter)) if sp.parameter else sp
+                     for sp in pop.stats]
+
+
 def load_workspace(path, search_dirs=(), locate=None) -> OpenedWorkspace:
     path = Path(path)
     wsp = read_wsp(path)
@@ -72,6 +95,7 @@ def load_workspace(path, search_dirs=(), locate=None) -> OpenedWorkspace:
             missing.append(s.file_name)
             continue
         sample = load_fcs(fcs)
+        _restore_parameter_names(s, [c.pnn for c in sample.channels])
         ps = ProcessedSample(sample, compensation=s.compensation, transforms=s.transforms)
         a = AnalyzedSample(ps, s.gates)
         file_kw = sample.keywords

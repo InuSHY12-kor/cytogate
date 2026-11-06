@@ -1,10 +1,17 @@
-"""Download public example FCS / FlowJo workspace files from the FlowKit repository (BSD-3).
+"""Download public example FCS / FlowJo workspace files.
 
-Usage: python scripts/fetch_test_data.py
+Usage: python scripts/fetch_test_data.py [--flowjo-vr]
 Files are saved under tests/data/ (git-ignored).
+
+- default: FlowKit repository examples (BSD-3)
+- --flowjo-vr: FlowJo's public tutorial data (github.com/FlowJo/FlowJo-VR, 8-colour
+  PBMC, about 100 MB): a FlowJo 10.0 workspace with FlowJo-computed Median,
+  Robust CV and frequencies, used by tests/test_flowjo_validation.py
 """
 
+import sys
 from pathlib import Path
+from urllib.parse import quote
 from urllib.request import urlopen
 
 BASE = "https://raw.githubusercontent.com/whitews/FlowKit/master/data/"
@@ -35,17 +42,64 @@ FILES = [
 
 DEST = Path(__file__).resolve().parent.parent / "tests" / "data"
 
+VR_BASE = "https://raw.githubusercontent.com/FlowJo/FlowJo-VR/master/"
+VR_DEST = "flowjo_vr"
+VR_FILES = [
+    "8 Color PBMC/Lesson_8.wsp",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C9.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A1.fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.2/D9.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A7 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C8.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B5 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C1.fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C3.fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.2/D2.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B2 .fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A8 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.2/D3.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A5 .fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B4 .fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A6 .fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A3 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C5.fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C2.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B7 .fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B1 .fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A4 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.2/D1.fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C4.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B6 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.2/D5.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A9 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.2/D7.fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.2/D4.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B9 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C7.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B8 .fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.2/B3 .fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.2/D6.fcs",
+    "8 Color PBMC/Exp. 2/Panel 2.1/C6.fcs",
+    "8 Color PBMC/Exp. 1/Panel_1.1/A2 .fcs",
+]
 
-def main() -> None:
-    for rel in FILES:
-        out = DEST / rel
+
+def fetch(base: str, files, dest: Path) -> None:
+    for rel in files:
+        out = dest / rel
         if out.exists():
             print(f"skip  {rel}")
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
-        with urlopen(BASE + rel) as resp:
+        with urlopen(base + quote(rel)) as resp:
             out.write_bytes(resp.read())
         print(f"saved {rel} ({out.stat().st_size:,} bytes)")
+
+
+def main() -> None:
+    fetch(BASE, FILES, DEST)
+    if "--flowjo-vr" in sys.argv[1:]:
+        fetch(VR_BASE, VR_FILES, DEST / VR_DEST)
 
 
 if __name__ == "__main__":
