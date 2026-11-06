@@ -315,7 +315,7 @@ def test_edge_warning(win, g):
 def test_statistics_panel(win, g, monkeypatch):
     g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
     sub = win.open_graph(E01, ("Rectangle",))
-    monkeypatch.setattr(win, "ask_stat", lambda a: StatSpec(Stat.MEDIAN, "FSC-A"))
+    monkeypatch.setattr(win, "ask_stat", lambda a, *_: StatSpec(Stat.MEDIAN, "FSC-A"))
     sub.add_statistic_dialog()
     rows = [sub.stat_list.item(i).text() for i in range(sub.stat_list.count())]
     assert rows[0].startswith("Freq. of Total:") and rows[1].startswith("Median : FSC-A:")

@@ -6,7 +6,7 @@ import numpy as np
 
 from .gating import Gate, GatingTree, Population
 from .processing import ProcessedSample
-from .stats import GeoMean, StatSpec, compute
+from .stats import GeoMean, StatMode, StatSpec, compute
 
 __all__ = ["AnalyzedSample"]
 
@@ -45,8 +45,10 @@ class AnalyzedSample:
         parent = self.count(path[:-1])
         return 100.0 * self.count(path) / parent if parent else 0.0
 
-    def stat(self, path, spec: StatSpec, geomean: GeoMean = GeoMean.GRAPH) -> float:
-        return compute(self, path, spec, geomean)
+    stat_mode: StatMode = StatMode.FLOWJO  # class-wide default; see stats.StatMode
+
+    def stat(self, path, spec: StatSpec, geomean: GeoMean = GeoMean.GRAPH, mode: StatMode | None = None) -> float:
+        return compute(self, path, spec, geomean, mode or self.stat_mode)
 
     def add_stat(self, path, spec: StatSpec) -> None:
         pop = self.gates.get(path)

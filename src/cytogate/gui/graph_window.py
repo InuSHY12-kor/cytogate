@@ -987,7 +987,7 @@ class GraphWindow(QtWidgets.QWidget):
 
     def add_statistic_dialog(self) -> None:
         a = self.analysis
-        spec = self.main.ask_stat(a)
+        spec = self.main.ask_stat(a, self.path)
         if spec is None:
             return
         self.main.record()

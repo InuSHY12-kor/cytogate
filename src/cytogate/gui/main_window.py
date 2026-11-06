@@ -473,16 +473,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.drop_on_group(self.populations_of(items), self.current_group())
 
     # --- statistics ----------------------------------------------------------
-    def ask_stat(self, a: AnalyzedSample):
+    def ask_stat(self, a: AnalyzedSample, path=()):
         """Show the Add Statistic dialog; returns a StatSpec or None (replaced in tests)."""
-        dlg = StatDialog([(p.name, p.label) for p in a.ps.parameters], self)
+        path = tuple(path)
+        dlg = StatDialog([(p.name, p.label) for p in a.ps.parameters], self,
+                         ancestors=[path[:i] for i in range(len(path) - 1)])
         return dlg.spec() if dlg.exec() else None
 
     def add_stat_dialog(self):
         a, path = self.selection()
         if a is None:
             return
-        spec = self.ask_stat(a)
+        spec = self.ask_stat(a, path)
         if spec is None:
             return
         self.record()
