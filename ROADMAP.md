@@ -16,7 +16,7 @@
 | 4. 게이팅 | Polygon, Rectangle, Ellipse, Quadrant, Range, Boolean, 게이트 트리 | `.wsp` 게이트 이벤트 수 일치 | ✅ (FlowJo 9 변환 파일 예외, 아래 참고) |
 | 5. 통계 | Count, Freq. of Parent/Total/Grandparent, Median, Mean, Geo. Mean, CV, SD, rCV | FlowJo 계산식과 일치 | ✅ (FlowJo 실제 값 비교는 8단계) |
 | 6. 그룹·일괄 적용 | 그룹, 게이트 일괄 적용, 샘플별 조정 | 여러 파일 일괄 처리 | ✅ |
-| 7. 출력 | Table Editor 형식 CSV/XLSX, `.wsp` 내보내기/불러오기, 그래프 PNG/SVG/PDF, 게이트 이벤트 FCS 내보내기 | FlowJo에서 `.wsp` 열기 | ⬜ |
+| 7. 출력 | Table Editor, Layout Editor, `.wsp` 저장/열기, 그래프·레이아웃 PDF/PNG/SVG/PPTX/HTML, 게이트 이벤트 FCS/CSV 내보내기 | FlowJo에서 `.wsp` 열기 | ✅ (FlowJo에서 열어보기는 8단계) |
 | 8. 검증 | 실제 FlowJo 분석 결과와 1:1 수치 비교 | 차이 리포트 | ⬜ |
 | 9. 배포 | Windows `.exe` (PyInstaller) | 더블클릭 실행 | ⬜ |
 | 선택 | tSNE/UMAP, FlowSOM, 세포 주기, 증식 분석 | — | ⬜ |
@@ -93,4 +93,25 @@
 - 하단 패널(접기/펼치기): Options(Type, 전경/배경색, Smooth, Show Outliers, Histogram Y), Active Gate(Events Inside, Tint, −/+ 크기), Statistics(Count/부모/비율, 통계 목록, Add Statistics)
 - 게이트 클릭 → 활성 게이트(빨간 윤곽 + 꼭짓점/모서리 핸들로 모양 변경), 방향키 1픽셀 이동, Delete 삭제, Esc 선택 해제
 - 새 게이트 이름 제안: FlowJo식 "X, Y subset"
-- 미구현(문서에 있음): 3D 보기, Graph Window Movies, Magnetic gate, Event # 파라미터, Copy To Layout Editor(7단계)
+- 미구현(문서에 있음): 3D 보기, Graph Window Movies, Magnetic gate, Event # 파라미터 (Copy To Layout Editor는 7단계에서 File > Add to Layout으로 추가)
+
+### 7단계 (사용자 선택 항목: A1, A3, A4, B2, C1, D1, D2, E1, F1–F4, G1, J1)
+- **J1 통계:** FlowJo식 4096-bin 계산(기본값, 정확 계산으로 전환 가능), Robust SD 축 밖 이벤트 규칙, Freq. of <상위 게이트>
+- **A1 워크스페이스:** File > Save / Save As / Open (`.wsp`, FlowJo 10 형식) — 게이트·그룹·보정·변환·키워드·통계·라벨 위치 저장, 옆 파일 `<이름>.wsp.cytogate.json`에 CytoGate 전용 정보(키워드 그룹 조건, 표·레이아웃 정의) 저장. FCS 파일이 옮겨졌으면 찾아 다시 연결, 5분마다 자동 저장, 닫을 때 저장 여부 확인
+- **A3·A4 키워드·편집:** 키워드 열 표시, 정렬, 필터, 값 입력·연속 번호·찾기/바꾸기·스프레드시트 붙여넣기, 게이트·그룹 이름 바꾸기(F2, Boolean 참조 자동 수정), 키워드 조건 그룹(자동 갱신), 통계 노드 끌어다 그룹/게이트에 복사, 샘플 속성 창
+- **B2 그래프 옵션:** 세 번째 파라미터 중앙값으로 점 색칠, Contour 단계(%)·해상도 설정
+- **C1 게이트:** AND/OR/NOT, Boolean 조합 일괄 생성, Bisector(BifurGate 자동 분할), Spider, Curly·Offset Quadrant
+- **D1·D2 보정·변환:** 보정 행렬 편집기, 단일 염색 대조군 마법사(중앙값 방식, AutoSpill 반복 회귀), 그룹 적용/해제, 변환 기본값 저장(Save as Default), 변환 복사
+- **G1 내보내기:** 게이트 이벤트를 FCS 3.1 / CSV(스케일 값, 채널 값) 로 내보내기, 여러 파일 합치기(전부·n개씩·키워드 값별, SampleID 파라미터)
+- **E1 Table Editor** (Reports > New Table): 게이트를 끌어오면 Freq. of Parent 열, 통계 노드를 끌어오면 그 통계 열. 키워드 열, 수식 열(`{열 이름}` 사칙연산·log 등), Control·Show·Heat map, 샘플별 / n개 튜브 패널별 / 키워드 값별 반복, Mean·SD 행, CSV·TXT·XLSX(히트맵 색 포함)·HTML·클립보드
+- **F1–F4 Layout Editor** (Reports > New Layout, 그래프 창 File > Add to Layout):
+  - 게이트를 끌어다 놓으면 그래프, 그래프 위에 놓으면 오버레이(색 변경·삭제), 선택 그래프 Backgate(상위 게이트 그래프 위에 빨간색으로 표시)
+  - 텍스트(`{Name}` `{Population}` `{Count}` `{Page}` `{Pages}` `{Date}` `{키워드}` 치환), 사각형·타원·선, Table Editor 표
+  - 격자 표시·맞춤, 크기 조절(오른쪽 아래 모서리), 앞/뒤 순서, 격자 정렬, 머리글·바닥글, 용지 크기·가로 방향
+  - 일괄 출력(Batch): 그룹의 샘플마다 / 키워드 값마다 복사본, 페이지마다·가로로·세로로 배치 → PDF(여러 페이지), PNG/JPG/TIFF·SVG(페이지별 파일), PowerPoint(그래프는 그림, 텍스트는 편집 가능한 텍스트 상자), HTML(웹 페이지 한 파일)
+  - 그림 양식 저장(Figure Presets): 레이아웃을 양식으로 저장해 새 레이아웃에 재사용
+- 확인하지 못한 것 (8단계 검증 대상): FlowJo 방식 통계값을 실제 FlowJo 표와 비교, AutoSpill은 합성 데이터로만 검증, 저장한 `.wsp`를 실제 FlowJo에서 열어보기, 화면에서 직접 끌어다 놓기는 놓기 처리 코드로만 시험
+
+| Table Editor | Layout Editor | 출력된 페이지 |
+|---|---|---|
+| ![](docs/images/table_editor.png) | ![](docs/images/layout_editor.png) | ![](docs/images/layout_page.png) |

@@ -43,6 +43,12 @@ python -m cytogate gui
   - 축 옆 **T** : 축 변환 창 (Scale, Min/Max, Width Basis 등, 양 끝 −/+ 로 범위 조정, Apply로 적용)
 - **게이트:** 그래프 창의 Rectangle / Polygon / Ellipse / Quadrant / Range로 그리기. 도구를 끈 상태에서 게이트 안쪽을 끌면 이동, 라벨을 끌면 라벨만 이동(더블클릭하면 원위치)
 - **게이트 복사:** 트리에서 게이트를 여러 개 골라 그룹 표의 **All Samples**(또는 다른 그룹)로 끌어다 놓으면 그 그룹 전체에, 다른 샘플 위에 놓으면 그 샘플에만 복사
+- **저장·열기:** File > Save / Open (FlowJo 10 `.wsp`). 옮겨진 FCS 파일은 위치를 물어서 다시 연결, 5분마다 자동 저장
+- **키워드·그룹:** Keywords 메뉴(값 입력, 연속 번호, 찾기/바꾸기, 열 표시), Groups > New Group by Keyword, 이름 바꾸기 F2
+- **보정:** Compensation > Compensation Matrix Editor (행렬 편집, 단일 염색 대조군으로 계산, AutoSpill)
+- **내보내기:** File > Export / Concatenate Populations (FCS·CSV)
+- **표:** Reports > New Table — 게이트·통계를 끌어다 놓고 Create Table, To File(CSV/TXT/XLSX/HTML)
+- **레이아웃:** Reports > New Layout 또는 그래프 창 File > Add to Layout (Ctrl+L). 게이트를 페이지에 끌어다 놓으면 그래프, 그래프 위에 놓으면 오버레이. Batch / Export로 샘플마다 PDF·PNG·SVG·PowerPoint·웹 페이지 출력
 
 | Pseudocolor | Contour | Density | Histogram |
 |---|---|---|---|
