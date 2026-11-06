@@ -17,15 +17,33 @@ from dataclasses import dataclass, field
 from .analysis import AnalyzedSample
 from .gating import Gate, Population
 
-__all__ = ["ALL_SAMPLES", "Group", "Workspace", "ApplyResult"]
+__all__ = ["ALL_SAMPLES", "Criterion", "Group", "Workspace", "ApplyResult"]
 
 ALL_SAMPLES = "All Samples"
+
+
+@dataclass(frozen=True)
+class Criterion:
+    """Keyword rule for a group: keyword `op` value (op: "equals" | "contains" | "starts with")."""
+
+    keyword: str
+    value: str
+    op: str = "equals"
+
+    def matches(self, a: AnalyzedSample) -> bool:
+        v = a.keyword(self.keyword, "")
+        if self.op == "contains":
+            return self.value.lower() in v.lower()
+        if self.op == "starts with":
+            return v.lower().startswith(self.value.lower())
+        return v == self.value
 
 
 @dataclass
 class Group:
     name: str
     samples: list[str] = field(default_factory=list)
+    criteria: list[Criterion] = field(default_factory=list)  # live group: membership from keywords
 
 
 @dataclass
@@ -62,14 +80,169 @@ class Workspace:
     def group(self, name: str) -> Group:
         return self.groups[name]
 
-    def create_group(self, name: str, samples=()) -> Group:
+    def create_group(self, name: str, samples=(), criteria=()) -> Group:
+        """A group of the given samples, or (with criteria) of every sample whose
+        keywords match all criteria, kept up to date by refresh_groups()."""
         name = name.strip()
         if not name or name in self.groups:
             raise ValueError(f"group name {name!r} is empty or already used")
-        g = Group(name, [])
+        g = Group(name, [], list(criteria))
         self._groups[name] = g
         self.add_to_group(name, samples)
+        self.refresh_groups()
         return g
+
+    def refresh_groups(self) -> None:
+        """Re-evaluate keyword-based groups (call after keywords change)."""
+        for g in self._groups.values():
+            if g.criteria:
+                g.samples = [n for n, a in self.samples.items() if all(c.matches(a) for c in g.criteria)]
+
+    def rename_group(self, old: str, new: str) -> None:
+        new = new.strip()
+        if old == ALL_SAMPLES:
+            raise ValueError("All Samples cannot be renamed")
+        if not new or new in self.groups:
+            raise ValueError(f"group name {new!r} is empty or already used")
+        g = self._groups.pop(old)
+        g.name = new
+        self._groups[new] = g
+        for a in self.samples.values():
+            for pop in a.gates:
+                if pop.owning_group == old:
+                    pop.owning_group = new
+
+    # --- keywords -------------------------------------------------------------------
+    def keyword_names(self) -> list[str]:
+        names: dict[str, None] = {}
+        for a in self.samples.values():
+            names.update(dict.fromkeys(a.keywords))
+        return list(names)
+
+    def set_keyword(self, samples, keyword: str, value: str) -> None:
+        for n in samples:
+            self.samples[n].user_keywords[keyword] = str(value)
+        self.refresh_groups()
+
+    def keyword_series(self, samples, keyword: str, start: float = 1, step: float = 1,
+                       prefix: str = "", suffix: str = "", digits: int = 0) -> list[str]:
+        """FlowJo's "Add a Keyword Value Series": prefix + start, start+step, … + suffix."""
+        values = []
+        for i, n in enumerate(samples):
+            v = start + i * step
+            text = f"{int(v):0{digits}d}" if float(v).is_integer() else f"{v:g}"
+            values.append(f"{prefix}{text}{suffix}")
+            self.samples[n].user_keywords[keyword] = values[-1]
+        self.refresh_groups()
+        return values
+
+    def find_replace(self, find: str, replace: str, keyword: str | None = None, samples=None) -> int:
+        """Replace text in keyword values (all keywords, or one). Returns the number changed."""
+        changed = 0
+        for n in samples or list(self.samples):
+            a = self.samples[n]
+            for k, v in a.keywords.items():
+                if (keyword is None or k == keyword) and find and find in v:
+                    a.user_keywords[k] = v.replace(find, replace)
+                    changed += 1
+        self.refresh_groups()
+        return changed
+
+    def paste_keywords(self, text: str) -> list[str]:
+        """Keywords from spreadsheet text (tab or comma separated). The first row
+        names the keywords; the first column is the sample name, or — if the
+        header's first cell is not "Name"/"Sample" — rows follow workspace order.
+        Returns the keywords set."""
+        rows = [r for r in (line.split("\t") if "\t" in line else line.split(",") for line in text.splitlines())
+                if any(c.strip() for c in r)]
+        if not rows:
+            return []
+        header = [c.strip() for c in rows[0]]
+        by_name = header[0].lower() in ("name", "sample", "$fil", "file")
+        keys = header[1:] if by_name else header
+        order = list(self.samples)
+        for i, r in enumerate(rows[1:]):
+            cells = [c.strip() for c in r]
+            if by_name:
+                name, cells = cells[0], cells[1:]
+                if name not in self.samples:
+                    continue
+            elif i < len(order):
+                name = order[i]
+            else:
+                break
+            for k, v in zip(keys, cells):
+                if k:
+                    self.samples[name].user_keywords[k] = v
+        self.refresh_groups()
+        return [k for k in keys if k]
+
+    # --- renaming and statistics ---------------------------------------------------------
+    def rename_population(self, sample: str, path, new_name: str, whole_group: bool = True) -> list[str]:
+        """Rename a population (in every linked sample of its group, or only this
+        one). Boolean gates and "Freq. of" statistics that refer to it follow."""
+        path = tuple(path)
+        new_name = new_name.strip()
+        if not new_name:
+            raise ValueError("empty name")
+        targets = self.linked_samples(sample, path) if whole_group else [sample]
+        new_path = path[:-1] + (new_name,)
+        for n in targets:
+            a = self.samples[n]
+            pop = a.gates.get(path)
+            if any(c.name == new_name for c in pop.parent.children if c is not pop):
+                raise ValueError(f"{'/'.join(new_path)} already exists in {n}")
+        for n in targets:
+            a = self.samples[n]
+            a.gates.get(path).name = new_name
+            if not whole_group:
+                a.gates.get(new_path).owning_group = None
+            _repoint(a, path, new_path)
+            a.invalidate()
+        return targets
+
+    def copy_transforms(self, source: str, targets, parameters=None) -> list[str]:
+        """FlowJo's CopyTransforms: give other samples the source's axis transforms."""
+        src = self.samples[source].ps.transforms
+        done = []
+        for n in targets:
+            if n == source:
+                continue
+            a = self.samples[n]
+            names = {p.name for p in a.ps.parameters}
+            for k, xf in src.items():
+                if k in names and (parameters is None or k in parameters):
+                    a.ps.transforms[k] = xf
+            a.invalidate()
+            done.append(n)
+        return done
+
+    def apply_compensation(self, comp, targets) -> tuple[list[str], dict[str, str]]:
+        """Apply a matrix (None = remove) to samples. Samples lacking one of its
+        detectors are skipped. Returns (changed, {skipped: reason})."""
+        done, skipped = [], {}
+        for n in targets:
+            a = self.samples[n]
+            if comp is not None:
+                missing = [d for d in comp.detectors if d not in {c.pnn for c in a.ps.sample.channels}]
+                if missing:
+                    skipped[n] = f"no detector {', '.join(missing)}"
+                    continue
+            a.set_compensation(comp)
+            done.append(n)
+        return done, skipped
+
+    def copy_statistic(self, spec, path, targets) -> list[str]:
+        """Add a statistic to population `path` of each target sample that has it."""
+        done = []
+        for n in targets:
+            a = self.samples[n]
+            try:
+                a.add_stat(path, spec)
+                done.append(n)
+            except KeyError:
+                continue
+        return done
 
     def delete_group(self, name: str) -> None:
         if name == ALL_SAMPLES:
@@ -176,6 +349,25 @@ class Workspace:
                 pop.owning_group = None
             a.invalidate()
         return targets
+
+
+def _replace_prefix(p: tuple, old: tuple, new: tuple) -> tuple:
+    return new + p[len(old):] if p[: len(old)] == old else p
+
+
+def _repoint(a: AnalyzedSample, old: tuple, new: tuple) -> None:
+    """After a rename, fix Boolean references and "Freq. of" ancestors."""
+    import dataclasses
+    from .gating import BooleanGate
+    from .stats import Stat
+
+    for pop in [a.gates.root, *a.gates]:
+        if isinstance(pop.gate, BooleanGate):
+            refs = tuple(_replace_prefix(r, old, new) for r in pop.gate.refs)
+            if refs != pop.gate.refs:
+                pop.gate = dataclasses.replace(pop.gate, refs=refs)
+        pop.stats = [dataclasses.replace(s, ancestor=_replace_prefix(s.ancestor, old, new))
+                     if s.stat == Stat.FREQ_OF and s.ancestor else s for s in pop.stats]
 
 
 def _set_owner(pop: Population, group: str) -> None:

@@ -22,17 +22,21 @@ class History:
 
     def _snapshot(self):
         return (
-            {n: (copy.deepcopy(a.gates.root), dict(a.ps.transforms)) for n, a in self.ws.samples.items()},
+            {n: (copy.deepcopy(a.gates.root), dict(a.ps.transforms), dict(a.user_keywords), a.ps.compensation)
+             for n, a in self.ws.samples.items()},
             copy.deepcopy(self.ws._groups),
         )
 
     def _restore(self, snap) -> list[str]:
         samples, groups = snap
-        for n, (root, transforms) in samples.items():
+        for n, (root, transforms, keywords, comp) in samples.items():
             if n in self.ws.samples:
                 a = self.ws.samples[n]
-                a.gates.root = root
+                if a.ps.compensation is not comp:
+                    a.set_compensation(comp)
+                a.gates.root = copy.deepcopy(root)
                 a.ps.transforms = dict(transforms)
+                a.user_keywords = dict(keywords)
                 a.invalidate()
         self.ws._groups = groups
         return list(samples)

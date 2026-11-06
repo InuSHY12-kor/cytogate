@@ -32,6 +32,7 @@ def release(w):
     """Close a workspace window and free its sample data (each holds ~160 MB)."""
     import gc
     w.close_all_graphs()
+    w.dirty = False  # don't ask to save
     w.close()
     w.ws.samples.clear()
     w.history._undo.clear()
@@ -86,7 +87,7 @@ def test_menus(g):
     menus = {m.title(): [a.text() for a in m.actions() if a.text()] for m in g.menu_bar.findChildren(QtWidgets.QMenu)
              if m.title()}
     assert menus["File"] == ["Close", "Close All Graph Windows", "Reset This Graph Window's Size",
-                             "Reset All Graph Windows Size", "Export Graphics As…", "Print…"]
+                             "Reset All Graph Windows Size", "Export Graphics As…", "Print…", "Add to Layout"]
     assert "Copy Histogram Function" in menus["Edit"] and "Undo" in menus["Edit"]
     assert menus["Graph"] == ["Duplicate View", "Transpose Axes", "Manually Enter Gate…"]
     assert menus["Display"] == ["Show Grid", "Draw Large Dots", "Show Gate Frequencies", "Show Gate Names",
@@ -315,7 +316,7 @@ def test_edge_warning(win, g):
 def test_statistics_panel(win, g, monkeypatch):
     g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
     sub = win.open_graph(E01, ("Rectangle",))
-    monkeypatch.setattr(win, "ask_stat", lambda a: StatSpec(Stat.MEDIAN, "FSC-A"))
+    monkeypatch.setattr(win, "ask_stat", lambda a, *_: StatSpec(Stat.MEDIAN, "FSC-A"))
     sub.add_statistic_dialog()
     rows = [sub.stat_list.item(i).text() for i in range(sub.stat_list.count())]
     assert rows[0].startswith("Freq. of Total:") and rows[1].startswith("Median : FSC-A:")
@@ -355,3 +356,20 @@ def test_print_to_pdf(g, tmp_path):
     printer.setOutputFileName(str(out))
     g.print_to(printer)
     assert out.stat().st_size > 1000
+
+
+def test_color_map_contour_level_resolution(win, g):
+    g.set_axes("Comp-CD4 PE-Cy7 FLR-A", "Comp-CD8 PerCP-Cy55 FLR-A")
+    plain = g.view.last_render.image.copy()
+    g.set_color_map("Comp-CD3 APC-H7 FLR-A")
+    assert g.view.options.color_param == "Comp-CD3 APC-H7 FLR-A"
+    coloured = g.view.last_render.image
+    assert not np.array_equal(plain, coloured)
+    g.set_color_map(None)
+    assert np.array_equal(g.view.last_render.image, plain)
+    g.res_box.setCurrentText("256")
+    assert g.view.last_render.image.shape[:2] == (256, 256)
+    g.type_box.setCurrentText("Contour")
+    n5 = g.view.last_render.levels.size
+    g.level_box.setCurrentText("20%")
+    assert g.view.last_render.levels.size < n5

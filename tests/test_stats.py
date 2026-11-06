@@ -12,7 +12,7 @@ import pytest
 
 from cytogate.core import Biex, Linear, Log, ProcessedSample, RectangleGate
 from cytogate.core.analysis import AnalyzedSample
-from cytogate.core.stats import GeoMean, Stat, StatSpec, column_name, parameter_stat
+from cytogate.core.stats import BINS, GeoMean, Stat, StatMode, StatSpec, binned, column_name, parameter_stat
 from cytogate.io import load_fcs
 
 rng = np.random.default_rng(1)
@@ -109,10 +109,14 @@ def test_parameter_stats_use_population_events(analysis):
     mask = analysis.mask(("Big", "CD3+"))
     v = analysis.ps.values("Comp-CD3 APC-H7 FLR-A")[mask]
     spec = StatSpec(Stat.MEDIAN, "Comp-CD3 APC-H7 FLR-A")
-    assert analysis.stat(("Big", "CD3+"), spec) == pytest.approx(np.median(v))
+    assert analysis.stat(("Big", "CD3+"), spec, mode=StatMode.EXACT) == pytest.approx(np.median(v))
     assert analysis.stat(("Big", "CD3+"), spec) >= 600
+    # FlowJo mode (default) works on 4096 bins: within one bin of the exact median
+    xf = analysis.ps.transforms["Comp-CD3 APC-H7 FLR-A"]
+    flowjo = analysis.stat(("Big", "CD3+"), spec)
+    assert abs(xf.apply([flowjo])[0] - xf.apply([np.median(v)])[0]) <= 1 / 4096
     # lookup by stain/label works too
-    assert analysis.stat(("Big",), StatSpec(Stat.MEAN, "FSC-A")) == pytest.approx(analysis.ps.values("FSC-A")[analysis.mask(("Big",))].mean())
+    assert analysis.stat(("Big",), StatSpec(Stat.MEAN, "FSC-A"), mode=StatMode.EXACT) == pytest.approx(analysis.ps.values("FSC-A")[analysis.mask(("Big",))].mean())
 
 
 def test_stats_follow_gate_changes(analysis):
@@ -124,3 +128,43 @@ def test_stats_follow_gate_changes(analysis):
     analysis.remove_gate(("Big", "CD3+"))
     analysis.add_gate("Big", "CD3+", RectangleGate(("Comp-CD3 APC-H7 FLR-A",), (2000.0,), (None,)))
     assert analysis.stat(("Big", "CD3+"), spec) < before
+
+
+# --- FlowJo mode (binned) and Freq. of <ancestor> ----------------------------------
+
+def test_binned_values_are_bin_centres():
+    xf = Linear(0, 4096)
+    idx, v = binned(np.array([-5.0, 0.2, 0.9, 10.5, 5000.0]), xf)
+    assert idx.tolist() == [0, 0, 0, 10, BINS - 1]
+    assert v.tolist() == [0.5, 0.5, 0.5, 10.5, 4095.5]
+
+
+def test_flowjo_mode_close_to_exact():
+    xf = Biex()
+    x = np.exp(rng.normal(7, 1, 100_000))
+    for stat in (Stat.MEDIAN, Stat.MEAN, Stat.GEOMEAN, Stat.ROBUST_CV, Stat.CV):
+        exact = parameter_stat(x, StatSpec(stat, "P"), xf, mode=StatMode.EXACT)
+        fj = parameter_stat(x, StatSpec(stat, "P"), xf, mode=StatMode.FLOWJO)
+        assert fj == pytest.approx(exact, rel=0.01), stat
+
+
+def test_robust_sd_off_scale_rule():
+    xf = Linear(0, 1000)
+    # more than 16% of events pile up above the top of the axis
+    x = np.concatenate([rng.normal(500, 50, 7000), np.full(3000, 5000.0)])
+    spec = StatSpec(Stat.ROBUST_SD, "P")
+    fj = parameter_stat(x, spec, xf, mode=StatMode.FLOWJO)
+    idx, v = binned(x, xf)
+    lo, med = np.percentile(v, [15.87, 50])
+    assert fj == pytest.approx(med - lo)  # only the on-scale (lower) range counts
+
+
+def test_freq_of_ancestor(analysis):
+    spec = StatSpec(Stat.FREQ_OF, ancestor=("Big",))
+    assert spec.label() == "Freq. of Big"
+    assert column_name(("Big", "CD3+"), spec) == "Big/CD3+ | Freq. of Big"
+    assert analysis.stat(("Big", "CD3+"), spec) == pytest.approx(
+        100 * analysis.count(("Big", "CD3+")) / analysis.count(("Big",)))
+    assert math.isnan(analysis.stat(("Big",), spec))  # not upstream of itself
+    with pytest.raises(ValueError):
+        StatSpec(Stat.FREQ_OF)

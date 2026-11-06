@@ -22,10 +22,12 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core import EllipseGate, PolygonGate, RectangleGate, default_transform, quadrant_gates
+from ..core.advanced_gates import (QUAD_ORDER, bisector_gates, curly_quadrant_gates, offset_quadrant_gates,
+                                   spider_gates)
 from ..core.analysis import AnalyzedSample
 from ..core.gating import move_vertex, scale_gate, translate_gate
 from ..plots import HistogramY, PlotType
-from .gate_tools import TOOLS
+from .gate_tools import HISTOGRAM_TOOLS, TOOLS
 from .plot_view import IMAGE_FORMATS, PlotView
 from .stat_dialog import format_stat
 from .transform_dialog import starter_transform
@@ -283,6 +285,7 @@ class GraphWindow(QtWidgets.QWidget):
         f.addSeparator()
         A["export"] = self._act(f, "Export Graphics As…", self.export_dialog, "Ctrl+S")
         A["print"] = self._act(f, "Print…", self.print_dialog, "Ctrl+P")
+        A["to_layout"] = self._act(f, "Add to Layout", self.add_to_layout, "Ctrl+L")
         e = mb.addMenu("Edit")
         A["undo"] = self._act(e, "Undo", lambda: self.main.undo(), "Ctrl+Z")
         A["redo"] = self._act(e, "Redo", lambda: self.main.redo(), "Ctrl+Shift+Z")
@@ -431,6 +434,26 @@ class GraphWindow(QtWidgets.QWidget):
         f.addLayout(colors, 1, 1)
         f.addWidget(self.smooth_box, 1, 2)
         f.addWidget(self.outliers_box, 1, 3)
+        self.color_map_box = QtWidgets.QCheckBox("Color Map Axis")
+        self.color_param_box = QtWidgets.QComboBox()
+        self.color_map_box.toggled.connect(self._color_map_changed)
+        self.color_param_box.currentIndexChanged.connect(self._color_map_changed)
+        self.level_box = QtWidgets.QComboBox()
+        for v in (2, 5, 10, 20):
+            self.level_box.addItem(f"{v}%", v / 100)
+        self.level_box.setCurrentIndex(1)
+        self.level_box.currentIndexChanged.connect(lambda *_: self._set_opt("contour_level", self.level_box.currentData()))
+        self.res_box = QtWidgets.QComboBox()
+        for v in (128, 256, 512, 1024):
+            self.res_box.addItem(str(v), v)
+        self.res_box.setCurrentText("512")
+        self.res_box.currentIndexChanged.connect(lambda *_: self._set_opt("resolution", self.res_box.currentData()))
+        f.addWidget(self.color_map_box, 2, 0)
+        f.addWidget(self.color_param_box, 2, 1)
+        f.addWidget(QtWidgets.QLabel("Contour level"), 2, 2)
+        f.addWidget(self.level_box, 2, 3)
+        f.addWidget(QtWidgets.QLabel("Resolution"), 3, 2)
+        f.addWidget(self.res_box, 3, 3)
         self.options_panel = Collapsible("Options", w)
 
         # Active Gate
@@ -496,6 +519,14 @@ class GraphWindow(QtWidgets.QWidget):
             for p in params:
                 box.addItem(p.label, p.name)
         self.y_box.addItem(HISTOGRAM_CHOICE, None)
+        keep_color = self.color_param_box.currentData()
+        self.color_param_box.blockSignals(True)
+        self.color_param_box.clear()
+        for p in params:
+            self.color_param_box.addItem(p.label, p.name)
+        if keep_color is not None and self.color_param_box.findData(keep_color) >= 0:
+            self.color_param_box.setCurrentIndex(self.color_param_box.findData(keep_color))
+        self.color_param_box.blockSignals(False)
         self.x_box.setCurrentIndex(max(self.x_box.findData(x), 0))
         self.y_box.setCurrentIndex(self.y_box.count() - 1 if y is None else max(self.y_box.findData(y), 0))
         for box in (self.x_box, self.y_box):
@@ -657,10 +688,28 @@ class GraphWindow(QtWidgets.QWidget):
         setattr(self.view.options, name, value)
         self.redraw()
 
+    def _color_map_changed(self, *_) -> None:
+        on = self.color_map_box.isChecked()
+        self.view.options.color_param = self.color_param_box.currentData() if on else None
+        self.redraw()
+
+    def set_color_map(self, param: str | None) -> None:
+        """Colour dots by a third parameter (None turns it off)."""
+        if param is not None:
+            self.color_param_box.setCurrentIndex(self.color_param_box.findData(param))
+        self.color_map_box.setChecked(param is not None)
+        self._color_map_changed()
+
     def _set_uncompensated(self, on: bool) -> None:
         self.show_uncompensated = on
         self._fill_params(self.x, self.y)
         self.redraw()
+
+    def add_to_layout(self, show: bool = True):
+        """This graph (sample, population, axes, plot type) into the Layout Editor."""
+        kind = "Histogram" if self.y is None else self.type_box.currentText()
+        return self.main.add_graph_to_layout(self.sample_name, self.path, self.x, self.y, kind,
+                                             self.hist_y_box.currentText(), show=show)
 
     def redraw(self, *_) -> None:
         a = self.analysis
@@ -681,6 +730,7 @@ class GraphWindow(QtWidgets.QWidget):
              for c in children if c.gate.dims],
             on_label_moved=self.label_moved, on_gate_moved=self.gate_moved,
             active=self.active, on_select=self.select_gate, on_vertex_moved=self.vertex_moved)
+        self._quad_handles()
         self._edge_warning(mask)
         n = a.count(self.path)
         if self.path:
@@ -800,7 +850,7 @@ class GraphWindow(QtWidgets.QWidget):
     def _sync_tools(self, *_) -> None:
         hist = self.y is None
         for tool, act in self.tool_actions.items():
-            ok = (tool == "Range") == hist
+            ok = (tool in HISTOGRAM_TOOLS) == hist
             act.setEnabled(ok)
             if not ok and act.isChecked():
                 act.setChecked(False)
@@ -835,6 +885,20 @@ class GraphWindow(QtWidgets.QWidget):
             self.main.record()
             made = [a.add_gate(parent, a.unique_name(parent, qname), gate).path
                     for qname, gate in quadrant_gates(x, y, to_x(qx), to_y(qy), xs.stain or xs.name, ys.stain or ys.name)]
+            self.main.data_changed([a.name])
+            return made
+        if tool in ("Spider", "Curly Quad", "Bisector"):
+            (px, py), = pts
+            xs = ps.parameter(x)
+            if tool == "Bisector":
+                made_gates = bisector_gates(x, to_x(px), xs.stain or xs.name)
+            else:
+                ys = ps.parameter(y)
+                maker = spider_gates if tool == "Spider" else curly_quadrant_gates
+                made_gates = maker(x, y, ps.transforms[x], ps.transforms[y], (px, py),
+                                   x_name=xs.stain or xs.name, y_name=ys.stain or ys.name)
+            self.main.record()
+            made = [a.add_gate(parent, a.unique_name(parent, n), g).path for n, g in made_gates]
             self.main.data_changed([a.name])
             return made
         if tool == "Range":
@@ -920,6 +984,74 @@ class GraphWindow(QtWidgets.QWidget):
         self.active = key
         return self._change_gate(key, translate_gate(a.gates.get(path).gate, a.ps, deltas))
 
+    # quadrant arms (offset quadrants) ------------------------------------------------------
+    def quad_set(self):
+        """If the active gate belongs to a rectangle quadrant on these axes:
+        ({"Q1": path, …}, splits dict in data units)."""
+        pop = self.active_population()
+        if pop is None or not isinstance(pop.gate, RectangleGate) or pop.name[:3] not in {f"{q}:" for q in QUAD_ORDER}:
+            return None
+        sibs = {c.name[:2]: c for c in pop.parent.children if c.name[:3] in {f"{q}:" for q in QUAD_ORDER}
+                and isinstance(c.gate, RectangleGate) and len(c.gate.dims) == 2}
+        if set(sibs) != set(QUAD_ORDER) or self.y is None:
+            return None
+        ps = self.analysis.ps
+        if tuple(ps.parameter(d).name for d in sibs["Q2"].gate.dims) != (ps.parameter(self.x).name, ps.parameter(self.y).name):
+            return None
+        q1, q2, q3, q4 = (sibs[q].gate for q in QUAD_ORDER)
+        splits = {"x_upper": q2.mins[0], "x_lower": q3.mins[0], "y_left": q1.mins[1], "y_right": q2.mins[1]}
+        if None in splits.values():
+            return None
+        return {q: sibs[q].path for q in QUAD_ORDER}, splits
+
+    def _quad_handles(self) -> None:
+        found = self.quad_set()
+        if found is None:
+            return
+        _, sp = found
+        ps = self.analysis.ps
+        fx = lambda v: float(ps.transforms[self.x].apply([v])[0])  # noqa: E731
+        fy = lambda v: float(ps.transforms[self.y].apply([v])[0])  # noqa: E731
+        pts = [(fx(sp["x_upper"]), fy(sp["y_left"])),  # 0 centre
+               (fx(sp["x_upper"]), 0.97), (fx(sp["x_lower"]), 0.03),  # 1 top arm, 2 bottom arm
+               (0.03, fy(sp["y_left"])), (0.97, fy(sp["y_right"]))]  # 3 left arm, 4 right arm
+        self.view.add_handles(pts, self.quad_arm_moved)
+
+    def quad_arm_moved(self, index: int, pos) -> list[str]:
+        """Drag the centre (moves the quadrant) or one arm (offsets that half of
+        the divider; the other direction is straightened, as in FlowJo)."""
+        found = self.quad_set()
+        if found is None:
+            return []
+        paths, sp = found
+        ps = self.analysis.ps
+        vx = float(ps.transforms[self.x].inverse([pos[0]])[0])
+        vy = float(ps.transforms[self.y].inverse([pos[1]])[0])
+        if index == 0:
+            sp = {"x_upper": vx, "x_lower": vx, "y_left": vy, "y_right": vy}
+        elif index in (1, 2):
+            sp["x_upper" if index == 1 else "x_lower"] = vx
+            sp["y_right"] = sp["y_left"]
+        else:
+            sp["y_left" if index == 3 else "y_right"] = vy
+            sp["x_lower"] = sp["x_upper"]
+        new = dict(zip(QUAD_ORDER, (g for _, g in offset_quadrant_gates(self.x, self.y, **sp))))
+        first = paths["Q1"]
+        linked = self.main.ws.linked_samples(self.sample_name, first)
+        whole = True
+        if len(linked) > 1:
+            scope = self.main.ask_scope(self.active_population().owning_group, len(linked))
+            if scope is None:
+                self.redraw()
+                return []
+            whole = scope == "group"
+        self.main.record()
+        changed = set()
+        for q in QUAD_ORDER:
+            changed.update(self.main.ws.update_gate(self.sample_name, paths[q], new[q], whole_group=whole))
+        self.main.data_changed(sorted(changed))
+        return sorted(changed)
+
     def vertex_moved(self, key, index: int, pos) -> list[str]:
         name, path = key
         a = self.main.samples[name]
@@ -987,7 +1119,7 @@ class GraphWindow(QtWidgets.QWidget):
 
     def add_statistic_dialog(self) -> None:
         a = self.analysis
-        spec = self.main.ask_stat(a)
+        spec = self.main.ask_stat(a, self.path)
         if spec is None:
             return
         self.main.record()

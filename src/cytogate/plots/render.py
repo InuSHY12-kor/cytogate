@@ -17,7 +17,7 @@ from scipy.ndimage import binary_dilation, gaussian_filter
 
 __all__ = [
     "PlotType", "HistogramY", "bin2d", "density", "probability_levels",
-    "render_2d", "Rendered2D", "histogram", "PSEUDOCOLOR_LUT",
+    "render_2d", "Rendered2D", "histogram", "PSEUDOCOLOR_LUT", "pixel_medians",
 ]
 
 
@@ -102,7 +102,11 @@ def render_2d(
     show_outliers: bool = True,
     dot_color=(0, 0, 0),
     large_dots: bool = False,
+    color_by: np.ndarray | None = None,
 ) -> Rendered2D:
+    """Render a 2D plot. `color_by` (display positions 0..1 of a third
+    parameter, one per event) colours each occupied pixel by the median of that
+    parameter there (FlowJo's colour-mapped axis) instead of by density."""
     counts = bin2d(x, y, res)
     dens = density(counts)
     image = np.zeros((res, res, 4), dtype=np.uint8)
@@ -130,11 +134,30 @@ def render_2d(
             image[occupied] = (*dot_color, 255)
     else:
         raise ValueError(f"{kind} is not a 2D plot type")
+    if color_by is not None and kind in (PlotType.DOT, PlotType.PSEUDOCOLOR):
+        med = pixel_medians(x, y, color_by, res)
+        image[occupied] = PSEUDOCOLOR_LUT[(np.clip(med[occupied], 0, 1) * 255).astype(int)]
     if large_dots:  # FlowJo "Draw Large Dots": grow single-colour dots by one pixel
         dots = np.all(image == (*dot_color, 255), axis=-1)
         grown = binary_dilation(dots) & (image[:, :, 3] == 0)
         image[grown] = (*dot_color, 255)
     return Rendered2D(image, counts, dens, levels)
+
+
+def pixel_medians(x, y, c, res: int) -> np.ndarray:
+    """Median of `c` over the events in each pixel (NaN where empty), shape (res, res)."""
+    pix = _bin_index(x, res) * res + _bin_index(y, res)
+    c = np.nan_to_num(np.asarray(c, dtype=float), nan=0.0)
+    order = np.lexsort((c, pix))
+    pix_s, c_s = pix[order], c[order]
+    counts = np.bincount(pix_s, minlength=res * res)
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    out = np.full(res * res, np.nan)
+    has = counts > 0
+    lo = starts[has] + (counts[has] - 1) // 2
+    hi = starts[has] + counts[has] // 2
+    out[has] = (c_s[lo] + c_s[hi]) / 2
+    return out.reshape(res, res)
 
 
 def histogram(

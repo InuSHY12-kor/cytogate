@@ -159,6 +159,9 @@ class TransformEditor(QtWidgets.QDialog):
         self.group_check = QtWidgets.QCheckBox(f"Apply to all samples in group \"{group}\"" if group else "")
         self.group_check.setVisible(bool(group))
         buttons = QtWidgets.QDialogButtonBox()
+        self.save_button = buttons.addButton("Save as Default", QtWidgets.QDialogButtonBox.ButtonRole.ResetRole)
+        self.save_button.setToolTip("Use this transform for this parameter in every sample loaded from now on")
+        self.save_button.clicked.connect(self.save_preset)
         self.apply_button = buttons.addButton("Apply", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.apply)
@@ -257,6 +260,11 @@ class TransformEditor(QtWidgets.QDialog):
     def calculate_width_basis(self) -> None:
         if isinstance(self.xf, Biex):
             self.set_transform(dataclasses.replace(self.xf, width=auto_width_basis(self.values, self.xf)))
+
+    def save_preset(self) -> None:
+        """FlowJo's "Save": remember this transform as the default for the parameter."""
+        from ..core.presets import save_preset
+        save_preset(self.param.name, self.xf)
 
     def apply(self) -> None:
         self.applied.emit(self.xf, self.group_check.isChecked())

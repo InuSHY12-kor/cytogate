@@ -14,31 +14,58 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..core import ProcessedSample
 from ..core.analysis import AnalyzedSample
 from ..core.history import History
-from ..core.workspace import ALL_SAMPLES, ApplyResult, Workspace
+from ..core.presets import apply_presets
+from ..core.stats import Stat, StatSpec
+from ..core.workspace import ALL_SAMPLES, ApplyResult, Criterion, Workspace
 from ..io import FcsReadError, load_fcs
+from ..io.wsp_load import load_workspace
+from ..io.wsp_write import write_wsp
 from .graph_window import GraphWindow
 from .stat_dialog import StatDialog, format_stat
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
 STAT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1  # StatSpec on statistic rows
 POP_MIME = "application/x-cytogate-populations"
+AUTOSAVE_MINUTES = 5
 
 
-def encode_populations(items) -> QtCore.QMimeData:
+def _spec_to_json(spec: StatSpec) -> dict:
+    return {"stat": spec.stat.value, "parameter": spec.parameter, "percentile": spec.percentile,
+            "ancestor": list(spec.ancestor) if spec.ancestor else None}
+
+
+def _spec_from_json(d: dict) -> StatSpec:
+    return StatSpec(Stat(d["stat"]), d.get("parameter"), d.get("percentile"),
+                    tuple(d["ancestor"]) if d.get("ancestor") else None)
+
+
+def encode_populations(items, stats=()) -> QtCore.QMimeData:
+    """Drag data: populations [(sample, path)] and statistic nodes [(sample, path, StatSpec)]."""
+    payload = [[s, list(p), None] for s, p in items] + [[s, list(p), _spec_to_json(sp)] for s, p, sp in stats]
     md = QtCore.QMimeData()
-    md.setData(POP_MIME, QtCore.QByteArray(json.dumps([[s, list(p)] for s, p in items]).encode()))
+    md.setData(POP_MIME, QtCore.QByteArray(json.dumps(payload).encode()))
     return md
 
 
-def decode_populations(md: QtCore.QMimeData) -> list[tuple[str, tuple[str, ...]]]:
+def _decode(md: QtCore.QMimeData) -> list:
     if not md.hasFormat(POP_MIME):
         return []
-    return [(s, tuple(p)) for s, p in json.loads(bytes(md.data(POP_MIME)).decode())]
+    return json.loads(bytes(md.data(POP_MIME)).decode())
+
+
+def decode_populations(md: QtCore.QMimeData) -> list[tuple[str, tuple[str, ...]]]:
+    return [(e[0], tuple(e[1])) for e in _decode(md) if len(e) < 3 or e[2] is None]
+
+
+def decode_statistics(md: QtCore.QMimeData) -> list[tuple[str, tuple[str, ...], StatSpec]]:
+    return [(e[0], tuple(e[1]), _spec_from_json(e[2])) for e in _decode(md) if len(e) >= 3 and e[2] is not None]
 
 
 class SampleTree(QtWidgets.QTreeWidget):
@@ -62,7 +89,7 @@ class SampleTree(QtWidgets.QTreeWidget):
         return [POP_MIME]
 
     def mimeData(self, items):
-        return encode_populations(self.main.populations_of(items))
+        return encode_populations(self.main.populations_of(items), self.main.statistics_of(items))
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasFormat(POP_MIME) or e.mimeData().hasUrls():
@@ -78,7 +105,12 @@ class SampleTree(QtWidgets.QTreeWidget):
         elif md.hasFormat(POP_MIME):
             item = self.itemAt(e.position().toPoint())
             if item is not None:
-                self.main.drop_on_sample(decode_populations(md), item.data(0, ROLE)[0])
+                name, path = item.data(0, ROLE)
+                pops, stats = decode_populations(md), decode_statistics(md)
+                if pops:
+                    self.main.drop_on_sample(pops, name)
+                if stats:  # FlowJo: a statistic dropped on a population is added there
+                    self.main.drop_stats_on_population(stats, name, tuple(path))
         e.acceptProposedAction()
 
 
@@ -108,19 +140,31 @@ class GroupTable(QtWidgets.QTreeWidget):
     def dropEvent(self, e):
         item = self.itemAt(e.position().toPoint())
         if item is not None:
-            self.main.drop_on_group(decode_populations(e.mimeData()), item.data(0, ROLE))
+            group = item.data(0, ROLE)
+            pops, stats = decode_populations(e.mimeData()), decode_statistics(e.mimeData())
+            if pops:
+                self.main.drop_on_group(pops, group)
+            if stats:
+                self.main.drop_stats_on_group(stats, group)
             e.acceptProposedAction()
 
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CytoGate — Workspace")
         self.resize(640, 760)
         self.ws = Workspace()
         self.samples: dict[str, AnalyzedSample] = self.ws.samples  # same dict
         self.graphs: list[GraphWindow] = []
         self.history = History(self.ws)
+        self.path: Path | None = None  # where the workspace is saved
+        self.dirty = False
+        self.extras: dict = {}  # CytoGate-only data saved in the side file (tables, layouts, …)
+        self.tables: list = []  # Table Editor definitions (core.table.TableDef)
+        self.table_editors: list = []
+        self.layouts: list = []  # Layout Editor documents (core.layout.Layout)
+        self.layout_editors: list = []
+        self._build_menu()
 
         bar = self.addToolBar("Workspace")
         bar.setMovable(False)
@@ -137,12 +181,25 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addSeparator()
         bar.addAction("Add Statistic…", self.add_stat_dialog)
         bar.addAction("Apply to Group", self.apply_to_current_group)
+        bar.addAction("Rename…", self.rename_selected)
         bar.addAction("Delete", self.delete_selected_gate)
 
         self.group_list = GroupTable(self)
         self.group_list.currentItemChanged.connect(lambda *_: self._group_changed())
         self.tree = SampleTree(self)
-        self.tree.itemDoubleClicked.connect(lambda item, _col: self.open_graph_for_item(item))
+        self.tree.itemDoubleClicked.connect(self._double_clicked)
+        self.tree.itemChanged.connect(self._item_changed)
+        self.tree.header().sectionClicked.connect(self.sort_samples)
+        self.tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_F2), self.tree, activated=self.rename_selected)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_F2), self.group_list, activated=self.rename_group_dialog)
+        self.filter_edit = QtWidgets.QLineEdit(placeholderText="Filter samples (name or keyword value)")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.textChanged.connect(lambda *_: self._group_changed())
+        self.keyword_columns: list[str] = []
+        self._filling = False
+        self._sort = (None, True)
         QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Delete, self.tree, activated=self.delete_selected_gate)
         QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), self.tree,
                         activated=lambda: self.open_graph_for_item(self.tree.currentItem()))
@@ -150,12 +207,297 @@ class MainWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
         layout.addWidget(self.group_list)
+        layout.addWidget(self.filter_edit)
         layout.addWidget(self.tree, 1)
         self.setCentralWidget(central)
         self.statusBar().showMessage("Add samples, then double-click a sample or gate to open a graph.")
         self.setAcceptDrops(True)
         self.refresh_groups()
         self._sync_undo()
+        self._update_title()
+        self.autosave_timer = QtCore.QTimer(self, interval=AUTOSAVE_MINUTES * 60 * 1000)
+        self.autosave_timer.timeout.connect(self.autosave)
+        self.autosave_timer.start()
+
+    def _build_menu(self) -> None:
+        m = self.menuBar().addMenu("File")
+        for text, slot, key in (("New Workspace", self.new_workspace, "Ctrl+N"),
+                                ("Open Workspace…", self.open_workspace_dialog, "Ctrl+O"),
+                                ("Save", self.save, "Ctrl+S"),
+                                ("Save As…", self.save_as_dialog, "Ctrl+Shift+S")):
+            a = m.addAction(text, slot)
+            a.setShortcut(QtGui.QKeySequence(key))
+        m.addSeparator()
+        m.addAction("Add Samples…", self.add_samples_dialog)
+        m.addAction("Add Folder…", self.add_folder_dialog)
+        m.addSeparator()
+        m.addAction("Export / Concatenate Populations…", self.export_dialog)
+        g = self.menuBar().addMenu("Groups")
+        g.addAction("New Group from Selection…", self.new_group_dialog)
+        g.addAction("New Group by Keyword…", self.new_keyword_group_dialog)
+        g.addAction("Rename Group…", self.rename_group_dialog)
+        g.addAction("Delete Group", self.delete_current_group)
+        k = self.menuBar().addMenu("Keywords")
+        k.addAction("Add / Edit Keyword…", self.add_keyword_dialog)
+        k.addAction("Keyword Value Series…", self.keyword_series_dialog)
+        k.addAction("Find / Replace…", self.find_replace_dialog)
+        k.addAction("Paste Keywords from Spreadsheet", lambda: self.paste_keywords(QtWidgets.QApplication.clipboard().text()))
+        k.addSeparator()
+        k.addAction("Show Keyword Columns…", self.keyword_columns_dialog)
+        b = self.menuBar().addMenu("Gates")
+        b.addAction("Make AND Gate", lambda: self.make_boolean("and"))
+        b.addAction("Make OR Gate", lambda: self.make_boolean("or"))
+        b.addAction("Make NOT Gate", lambda: self.make_boolean("not"))
+        b.addAction("Boolean Combinations", self.make_combinations)
+        b.addSeparator()
+        b.addAction("BifurGate (auto bisector gates)", self.bifurgate)
+        c = self.menuBar().addMenu("Compensation")
+        c.addAction("Compensation Matrix Editor…", self.compensation_dialog)
+        c.addAction("Remove Compensation (selected samples)",
+                    lambda: self.apply_compensation(None, self.selected_sample_names()))
+        c.addSeparator()
+        c.addAction("Copy Transforms to Current Group", self.copy_transforms_to_group)
+        t = self.menuBar().addMenu("Reports")
+        t.addAction("New Table…", lambda: self.open_table_editor(None))
+        self.tables_menu = t.addMenu("Open Table")
+        self.tables_menu.aboutToShow.connect(self._fill_tables_menu)
+        t.addSeparator()
+        t.addAction("New Layout…", lambda: self.open_layout_editor(None))
+        self.layouts_menu = t.addMenu("Open Layout")
+        self.layouts_menu.aboutToShow.connect(self._fill_layouts_menu)
+        k.addAction("Sample Properties…", self.sample_properties)
+
+    # --- saving / opening ----------------------------------------------------------------
+    def _update_title(self) -> None:
+        name = self.path.name if self.path else "Untitled"
+        self.setWindowTitle(f"CytoGate — {name}{' *' if self.dirty else ''}")
+
+    def mark_dirty(self) -> None:
+        if not self.dirty:
+            self.dirty = True
+            self._update_title()
+
+    def collect_extras(self) -> dict:
+        """CytoGate-only data to keep in the side file (filled in by the editors)."""
+        out = dict(self.extras)
+        out["keyword_columns"] = list(self.keyword_columns)
+        from .table_editor import tables_to_extras
+        out["tables"] = tables_to_extras(self.tables)
+        from ..core.layout import layout_to_json
+        out["layouts"] = [layout_to_json(lay) for lay in self.layouts]
+        return out
+
+    # --- layouts -----------------------------------------------------------------------
+    def store_layouts(self) -> None:
+        """Called by the Layout Editor whenever a layout changes."""
+        self.mark_dirty()
+
+    def unique_layout_name(self, base: str = "Layout") -> str:
+        import re as _re
+        names = {lay.name for lay in self.layouts}
+        if base not in names:
+            return base
+        stem = _re.sub(r"\s+\d+$", "", base) or "Layout"
+        n = 2
+        while f"{stem} {n}" in names:
+            n += 1
+        return f"{stem} {n}"
+
+    def open_layout_editor(self, layout=None, show: bool = True):
+        from ..core.layout import Layout
+        from .layout_editor import LayoutEditor
+        if layout is None:
+            layout = Layout(name=self.unique_layout_name("Layout 1"))
+        if all(lay is not layout for lay in self.layouts):
+            self.layouts.append(layout)
+            self.mark_dirty()
+        for ed in self.layout_editors:
+            if ed.layout is layout:
+                ed.rebuild()
+                if show:
+                    ed.show()
+                    ed.raise_()
+                return ed
+        ed = LayoutEditor(self, layout)
+        self.layout_editors.append(ed)
+        if show:
+            ed.show()
+            ed.fit_page()
+        return ed
+
+    def add_graph_to_layout(self, sample, path, x, y, plot_type=None, hist_y=None, show: bool = True):
+        """Graph window > File > Add to Layout: into the last layout opened (a new one if none)."""
+        ed = next((e for e in reversed(self.layout_editors) if e.isVisible()), None) or \
+            (self.layout_editors[-1] if self.layout_editors else self.open_layout_editor(None, show=show))
+        it = ed.add_graph(sample, path, x, y, plot_type, hist_y)
+        if show:
+            ed.show()
+            ed.raise_()
+        return ed, it
+
+    def _fill_layouts_menu(self) -> None:
+        self.layouts_menu.clear()
+        for lay in self.layouts:
+            self.layouts_menu.addAction(lay.name, lambda lay=lay: self.open_layout_editor(lay))
+
+    def close_layout_editors(self) -> None:
+        for ed in self.layout_editors:
+            ed.close()
+            ed.deleteLater()
+        self.layout_editors.clear()
+
+    # --- tables ------------------------------------------------------------------------
+    def store_tables(self) -> None:
+        """Called by the Table Editor whenever a definition changes."""
+        self.mark_dirty()
+
+    def open_table_editor(self, table=None, show: bool = True):
+        from ..core.table import TableDef
+        from .table_editor import TableEditor
+        if table is None:
+            names = {t.name for t in self.tables}
+            n = 1
+            while f"Table {n}" in names:
+                n += 1
+            table = TableDef(name=f"Table {n}")
+            self.tables.append(table)
+            self.mark_dirty()
+        for ed in self.table_editors:
+            if ed.table is table:
+                ed.reload_choices()
+                if show:
+                    ed.show()
+                    ed.raise_()
+                return ed
+        ed = TableEditor(self, table)
+        self.table_editors.append(ed)
+        if show:
+            ed.show()
+        return ed
+
+    def _fill_tables_menu(self) -> None:
+        self.tables_menu.clear()
+        for t in self.tables:
+            self.tables_menu.addAction(t.name, lambda t=t: self.open_table_editor(t))
+
+    def close_table_editors(self) -> None:
+        for ed in self.table_editors:
+            ed.close()
+            ed.deleteLater()
+        self.table_editors.clear()
+
+    def save(self, path=None) -> Path | None:
+        path = Path(path) if path else self.path
+        if path is None:
+            return self.save_as_dialog()
+        if path.suffix.lower() != ".wsp":
+            path = path.with_suffix(".wsp")
+        write_wsp(path, self.ws, extras=self.collect_extras())
+        self.path = path
+        self.dirty = False
+        self._update_title()
+        self.statusBar().showMessage(f"Saved {path}")
+        return path
+
+    def save_as_dialog(self) -> Path | None:
+        start = str(self.path or "workspace.wsp")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Workspace", start, "FlowJo workspace (*.wsp)")
+        return self.save(path) if path else None
+
+    def autosave(self) -> Path | None:
+        """Write a backup next to the workspace (or in the home folder if never saved)."""
+        if not self.dirty or not self.samples:
+            return None
+        target = (self.path.with_name(self.path.stem + ".autosave.wsp") if self.path
+                  else Path.home() / "CytoGate-autosave.wsp")
+        try:
+            write_wsp(target, self.ws, extras=self.collect_extras())
+        except OSError:
+            return None
+        self.statusBar().showMessage(f"Auto-saved to {target}")
+        return target
+
+    def ask_locate(self, file_name: str) -> str | None:
+        """Ask where a missing FCS file is now (replaced in tests)."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, f"Locate {file_name}", file_name,
+                                                        "FCS files (*.fcs *.FCS);;All files (*)")
+        return path or None
+
+    def ask_save_changes(self) -> str:
+        """"save" / "discard" / "cancel" before closing or replacing the workspace (replaced in tests)."""
+        r = QtWidgets.QMessageBox.question(
+            self, "CytoGate", "Save changes to this workspace?",
+            QtWidgets.QMessageBox.StandardButton.Save | QtWidgets.QMessageBox.StandardButton.Discard
+            | QtWidgets.QMessageBox.StandardButton.Cancel)
+        return {QtWidgets.QMessageBox.StandardButton.Save: "save",
+                QtWidgets.QMessageBox.StandardButton.Discard: "discard"}.get(r, "cancel")
+
+    def _ok_to_replace(self) -> bool:
+        if not self.dirty or not self.samples:
+            return True
+        choice = self.ask_save_changes()
+        if choice == "save":
+            return self.save() is not None
+        return choice == "discard"
+
+    def _install(self, ws: Workspace, path: Path | None, extras: dict) -> None:
+        self.close_all_graphs()
+        self.ws = ws
+        self.samples = ws.samples
+        self.history = History(ws)
+        self.path = path
+        self.extras = dict(extras)
+        self.tree.clear()
+        self.keyword_columns = list(self.extras.pop("keyword_columns", []))
+        from .table_editor import tables_from_extras
+        self.close_table_editors()
+        self.tables = tables_from_extras(self.extras.pop("tables", []))
+        from ..core.layout import layout_from_json
+        self.close_layout_editors()
+        self.layouts = []
+        for d in self.extras.pop("layouts", []) or []:
+            try:
+                self.layouts.append(layout_from_json(d))
+            except (KeyError, TypeError, ValueError):
+                continue
+        self.tree.setColumnCount(3 + len(self.keyword_columns))
+        self.tree.setHeaderLabels(["Name", "Statistic", "#Cells", *self.keyword_columns])
+        for a in ws.samples.values():
+            self._add_sample_item(a)
+            self.refresh_tree(a.name)
+        if self.tree.topLevelItemCount():
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        self.refresh_groups(select=ALL_SAMPLES)
+        self.dirty = False
+        self._sync_undo()
+        self._update_title()
+        self.workspace_replaced()
+
+    def workspace_replaced(self) -> None:
+        """Hook for editors that keep state per workspace."""
+
+    def new_workspace(self) -> bool:
+        if not self._ok_to_replace():
+            return False
+        self._install(Workspace(), None, {})
+        return True
+
+    def open_workspace(self, path) -> list[str]:
+        """Open a .wsp; returns the FCS files that could not be found."""
+        if not self._ok_to_replace():
+            return []
+        opened = load_workspace(path, locate=self.ask_locate)
+        self._install(opened.workspace, Path(path), opened.extras)
+        if opened.missing:
+            QtWidgets.QMessageBox.warning(self, "Missing samples",
+                                          "These FCS files were not found:\n" + "\n".join(opened.missing))
+        self.statusBar().showMessage(f"Opened {path} ({len(self.samples)} samples)")
+        return opened.missing
+
+    def open_workspace_dialog(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Workspace", "", "FlowJo workspace (*.wsp)")
+        if path:
+            self.open_workspace(path)
 
     # --- samples ----------------------------------------------------------
     def add_samples(self, paths) -> list[str]:
@@ -166,15 +508,14 @@ class MainWindow(QtWidgets.QMainWindow):
             for f in files:
                 try:
                     a = AnalyzedSample(ProcessedSample(load_fcs(f)))
+                    apply_presets(a.ps)  # saved transform presets
                 except (FcsReadError, KeyError, ValueError) as exc:
                     errors.append(f"{f.name}: {exc}")
                     continue
                 if not self.ws.add_sample(a):
                     continue
-                item = QtWidgets.QTreeWidgetItem([a.name, "", f"{a.ps.event_count:,}"])
-                item.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight)
-                item.setData(0, ROLE, (a.name, ()))
-                self.tree.addTopLevelItem(item)
+                self._add_sample_item(a)
+                self.mark_dirty()
         if self.tree.currentItem() is None and self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         if errors:
@@ -182,6 +523,425 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_groups()
         self.statusBar().showMessage(f"{len(self.samples)} samples")
         return errors
+
+    def _add_sample_item(self, a: AnalyzedSample) -> QtWidgets.QTreeWidgetItem:
+        item = QtWidgets.QTreeWidgetItem([a.name, "", f"{a.ps.event_count:,}"])
+        item.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignRight)
+        item.setData(0, ROLE, (a.name, ()))
+        self.tree.addTopLevelItem(item)
+        self._fill_keyword_cells(item, a)
+        return item
+
+    # --- keyword columns -----------------------------------------------------------
+    def _fill_keyword_cells(self, item, a) -> None:
+        self._filling = True
+        for i, k in enumerate(self.keyword_columns):
+            item.setText(3 + i, a.keyword(k))
+        item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsEditable)
+        self._filling = False
+
+    def set_keyword_columns(self, keywords) -> None:
+        """Show these keywords as columns of the sample list (FlowJo's keyword columns)."""
+        self.keyword_columns = list(keywords)
+        self.tree.setColumnCount(3 + len(self.keyword_columns))
+        self.tree.setHeaderLabels(["Name", "Statistic", "#Cells", *self.keyword_columns])
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            self._fill_keyword_cells(it, self.samples[it.data(0, ROLE)[0]])
+
+    def refresh_keywords(self) -> None:
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            self._fill_keyword_cells(it, self.samples[it.data(0, ROLE)[0]])
+        self.refresh_groups()
+
+    def sort_samples(self, column: int) -> None:
+        """Header click: order samples by that column (repeat to reverse). The
+        order is what ◀ ▶ and batches follow."""
+        col, asc = self._sort
+        asc = not asc if col == column else True
+        self._sort = (column, asc)
+        items = [self.tree.takeTopLevelItem(0) for _ in range(self.tree.topLevelItemCount())]
+
+        def key(it):
+            name = it.data(0, ROLE)[0]
+            if column == 2:
+                return (0, self.samples[name].ps.event_count, "")
+            text = it.text(column)
+            try:
+                return (0, float(text), "")
+            except ValueError:
+                return (1, 0.0, text.lower())
+        items.sort(key=key, reverse=not asc)
+        for it in items:
+            self.tree.addTopLevelItem(it)
+            it.setExpanded(True)
+        self.tree.expandAll()
+        self._group_changed()
+
+    def _double_clicked(self, item, column: int) -> None:
+        if item.parent() is None and column >= 3:
+            self.tree.editItem(item, column)  # edit a keyword value in place
+        else:
+            self.open_graph_for_item(item)
+
+    def _item_changed(self, item, column: int) -> None:
+        if self._filling or item.parent() is not None or column < 3:
+            return
+        key = self.keyword_columns[column - 3]
+        name = item.data(0, ROLE)[0]
+        if self.samples[name].keyword(key) == item.text(column):
+            return
+        self.set_keyword([name], key, item.text(column))
+
+    # --- keyword editing ---------------------------------------------------------------
+    def target_samples(self) -> list[str]:
+        """Selected samples, else every visible one."""
+        return self.selected_sample_names() or self.visible_samples()
+
+    def set_keyword(self, samples, key: str, value: str) -> None:
+        self.record()
+        self.ws.set_keyword(samples, key, value)
+        self.refresh_keywords()
+
+    def keyword_series(self, samples, key: str, **kw) -> list[str]:
+        self.record()
+        out = self.ws.keyword_series(samples, key, **kw)
+        self.refresh_keywords()
+        return out
+
+    def find_replace(self, find: str, replace: str, keyword: str | None = None) -> int:
+        self.record()
+        n = self.ws.find_replace(find, replace, keyword)
+        self.refresh_keywords()
+        self.statusBar().showMessage(f"Replaced in {n} keyword value(s)")
+        return n
+
+    def paste_keywords(self, text: str) -> list[str]:
+        self.record()
+        keys = self.ws.paste_keywords(text)
+        for k in keys:
+            if k not in self.keyword_columns:
+                self.keyword_columns.append(k)
+        self.set_keyword_columns(self.keyword_columns)
+        self.refresh_keywords()
+        return keys
+
+    def _form(self, title: str, fields: list[tuple[str, QtWidgets.QWidget]]) -> bool:
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        form = QtWidgets.QFormLayout(dlg)
+        for label, w in fields:
+            form.addRow(label, w)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok
+                                        | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        return bool(dlg.exec())
+
+    def _keyword_combo(self, editable=True) -> QtWidgets.QComboBox:
+        c = QtWidgets.QComboBox(editable=editable)
+        c.addItems(sorted(self.ws.keyword_names(), key=lambda k: (k.startswith("$"), k.lower())))
+        c.setCurrentText("")
+        return c
+
+    def add_keyword_dialog(self) -> None:
+        key, value = self._keyword_combo(), QtWidgets.QLineEdit()
+        if self._form("Add / Edit Keyword", [("Keyword", key), ("Value", value)]) and key.currentText().strip():
+            self.set_keyword(self.target_samples(), key.currentText().strip(), value.text())
+
+    def keyword_series_dialog(self) -> None:
+        key = self._keyword_combo()
+        start = QtWidgets.QDoubleSpinBox(minimum=-1e9, maximum=1e9, value=1, decimals=3)
+        step = QtWidgets.QDoubleSpinBox(minimum=-1e9, maximum=1e9, value=1, decimals=3)
+        prefix, suffix = QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
+        digits = QtWidgets.QSpinBox(minimum=0, maximum=8)
+        if self._form("Keyword Value Series", [("Keyword", key), ("Start", start), ("Step", step),
+                                               ("Prefix", prefix), ("Suffix", suffix), ("Digits", digits)]):
+            if key.currentText().strip():
+                self.keyword_series(self.target_samples(), key.currentText().strip(), start=start.value(),
+                                    step=step.value(), prefix=prefix.text(), suffix=suffix.text(), digits=digits.value())
+
+    def find_replace_dialog(self) -> None:
+        find, repl = QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
+        key = self._keyword_combo(editable=False)
+        key.insertItem(0, "(all keywords)")
+        key.setCurrentIndex(0)
+        if self._form("Find / Replace", [("Find", find), ("Replace with", repl), ("In", key)]) and find.text():
+            self.find_replace(find.text(), repl.text(), None if key.currentIndex() == 0 else key.currentText())
+
+    def keyword_columns_dialog(self) -> None:
+        lst = QtWidgets.QListWidget()
+        for k in sorted(self.ws.keyword_names(), key=lambda k: (k.startswith("$"), k.lower())):
+            it = QtWidgets.QListWidgetItem(k)
+            it.setCheckState(QtCore.Qt.CheckState.Checked if k in self.keyword_columns else QtCore.Qt.CheckState.Unchecked)
+            lst.addItem(it)
+        if self._form("Keyword Columns", [("Show", lst)]):
+            self.set_keyword_columns([lst.item(i).text() for i in range(lst.count())
+                                      if lst.item(i).checkState() == QtCore.Qt.CheckState.Checked])
+
+    def sample_properties(self, name: str | None = None) -> QtWidgets.QDialog | None:
+        """Keywords (editable), parameters, compensation matrix and file details of a sample."""
+        name = name or (self.selection()[0].name if self.selection()[0] else None)
+        if name is None:
+            return None
+        from .sample_properties import SamplePropertiesDialog
+        dlg = SamplePropertiesDialog(self.samples[name], self)
+        dlg.keywords_changed.connect(lambda changes: [self.set_keyword([name], k, v) for k, v in changes.items()])
+        dlg.show()
+        return dlg
+
+    # --- data export -----------------------------------------------------------------------
+    def export_items(self) -> list[tuple[str, tuple[str, ...]]]:
+        """Selected populations/samples; with nothing selected, the samples of the current group."""
+        items = self.populations_of(self.tree.selectedItems())
+        return items or [(n, ()) for n in self.ws.group(self.current_group()).samples]
+
+    def export_dialog(self, show: bool = True):
+        from .export_dialog import ExportDialog
+        items = self.export_items()
+        if not items:
+            return None
+        dlg = ExportDialog(self, items, self)
+        if show:
+            dlg.exec()
+        return dlg
+
+    # --- Boolean gates and BifurGate -----------------------------------------------------------
+    def _selected_paths(self) -> tuple[str, list[tuple[str, ...]]] | None:
+        pops = [(n, p) for n, p in self.populations_of(self.tree.selectedItems()) if p]
+        if not pops or len({n for n, _ in pops}) != 1:
+            self.statusBar().showMessage("Select populations of one sample.")
+            return None
+        return pops[0][0], [p for _, p in pops]
+
+    @staticmethod
+    def _common_parent(paths) -> tuple[str, ...]:
+        parents = [p[:-1] for p in paths]
+        common = parents[0]
+        for p in parents[1:]:
+            i = 0
+            while i < min(len(common), len(p)) and common[i] == p[i]:
+                i += 1
+            common = common[:i]
+        return common
+
+    def make_boolean(self, op: str, sample: str | None = None, paths=None) -> tuple[str, ...] | None:
+        """AND / OR of the selected populations, or NOT of one, placed under their
+        common parent (FlowJo names: "A & B", "A or B", "NOT A")."""
+        from ..core.gating import BooleanGate
+        if paths is None:
+            sel = self._selected_paths()
+            if sel is None:
+                return None
+            sample, paths = sel
+        paths = [tuple(p) for p in paths]
+        if (op == "not") != (len(paths) == 1) or not paths:
+            self.statusBar().showMessage("AND/OR need two or more populations; NOT needs one.")
+            return None
+        a = self.samples[sample]
+        names = [p[-1] for p in paths]
+        name = {"and": " & ".join(names), "or": " or ".join(names), "not": f"NOT {names[0]}"}[op]
+        parent = self._common_parent(paths)
+        self.record()
+        pop = a.add_gate(parent, a.unique_name(parent, name), BooleanGate(op, tuple(paths)))
+        self.data_changed([sample])
+        return pop.path
+
+    def make_combinations(self, sample: str | None = None, paths=None) -> list[tuple[str, ...]]:
+        """Every +/- combination of the selected populations (FlowJo's Boolean
+        combination gates), as AND gates of the populations and NOT gates of them."""
+        from ..core.advanced_gates import boolean_combination_names
+        from ..core.gating import BooleanGate
+        if paths is None:
+            sel = self._selected_paths()
+            if sel is None:
+                return []
+            sample, paths = sel
+        paths = [tuple(p) for p in paths]
+        if len(paths) < 2:
+            return []
+        a = self.samples[sample]
+        parent = self._common_parent(paths)
+        self.record()
+        negs = []
+        for p in paths:
+            neg = p[:-1] + (f"NOT {p[-1]}",)
+            if neg not in a.gates.paths():
+                a.add_gate(p[:-1], neg[-1], BooleanGate("not", (p,)))
+            negs.append(neg)
+        made = []
+        for name, signs in boolean_combination_names([p[-1] for p in paths]):
+            refs = tuple(p if s else n for p, n, s in zip(paths, negs, signs))
+            made.append(a.add_gate(parent, a.unique_name(parent, name), BooleanGate("and", refs)).path)
+        self.data_changed([sample])
+        return made
+
+    def bifurgate(self, sample: str | None = None, path=None) -> list[tuple[str, ...]]:
+        """Bisector gates on every fluorescence parameter (compensated when
+        available) not already gated above this population, split at the dip
+        between its two main peaks."""
+        from ..core.advanced_gates import bisector_gates, find_split
+        if sample is None:
+            a, path = self.selection()
+            if a is None:
+                return []
+            sample = a.name
+        a = self.samples[sample]
+        path = tuple(path or ())
+        used = set()
+        node = a.gates.get(path)
+        while node is not None and node.gate is not None:
+            used.update(a.ps.parameter(d).name for d in node.gate.dims)
+            node = node.parent
+        comp = a.ps.compensation
+        params = [p for p in a.ps.parameters if p.kind == "fluorescence"
+                  and (p.compensated or comp is None or p.name not in comp.detectors) and p.name not in used]
+        mask = a.mask(path)
+        plans = []
+        for p in params:
+            split = find_split(np.clip(a.ps.scaled(p.name)[mask], 0, 1))
+            if split is not None:
+                value = float(a.ps.transforms[p.name].inverse([split])[0])
+                plans.append(bisector_gates(p.name, value, p.stain or p.name))
+        if not plans:
+            self.statusBar().showMessage("BifurGate: no bimodal parameters found")
+            return []
+        self.record()
+        made = []
+        for gates in plans:
+            for name, g in gates:
+                made.append(a.add_gate(path, a.unique_name(path, name), g).path)
+        self.data_changed([sample])
+        self.statusBar().showMessage(f"BifurGate: split {len(plans)} parameter(s)")
+        return made
+
+    # --- compensation and transforms -----------------------------------------------------
+    def compensation_dialog(self, show: bool = True):
+        a, _ = self.selection()
+        if a is None:
+            return None
+        from .compensation_dialog import CompensationDialog
+        dlg = CompensationDialog(self, a.name, self)
+        if show:
+            dlg.show()
+        return dlg
+
+    def apply_compensation(self, comp, targets) -> list[str]:
+        """Apply a matrix (None = remove compensation) to samples."""
+        targets = list(targets)
+        if not targets:
+            return []
+        self.record()
+        done, skipped = self.ws.apply_compensation(comp, targets)
+        if skipped:
+            QtWidgets.QMessageBox.warning(self, "Compensation", "Not applied to:\n" +
+                                          "\n".join(f"{k}: {v}" for k, v in skipped.items()))
+        self.data_changed(done)
+        for g in self.graphs:  # parameter lists change with the matrix
+            if g.sample_name in done:
+                g.show_population(g.sample_name, g.path)
+        self.statusBar().showMessage(
+            f"{'Removed compensation from' if comp is None else 'Applied ' + comp.name + ' to'} {len(done)} sample(s)")
+        return done
+
+    def copy_transforms_to_group(self, source: str | None = None) -> list[str]:
+        source = source or (self.selection()[0].name if self.selection()[0] else None)
+        if source is None:
+            return []
+        self.record()
+        done = self.ws.copy_transforms(source, self.ws.group(self.current_group()).samples)
+        self.data_changed(done)
+        self.statusBar().showMessage(f"Copied transforms from {source} to {len(done)} sample(s)")
+        return done
+
+    # --- renaming ------------------------------------------------------------------------------
+    def ask_text(self, title: str, label: str, default: str = "") -> str | None:
+        """Ask for a line of text (replaced in tests)."""
+        text, ok = QtWidgets.QInputDialog.getText(self, title, label, text=default)
+        return text.strip() if ok and text.strip() else None
+
+    def rename_selected(self) -> list[str]:
+        a, path = self.selection()
+        if a is None or not path or self.selected_stat() is not None:
+            return []
+        new = self.ask_text("Rename", "New name:", path[-1])
+        if not new or new == path[-1]:
+            return []
+        pop = a.gates.get(path)
+        linked = self.ws.linked_samples(a.name, path)
+        whole = True
+        if len(linked) > 1:
+            scope = self.ask_scope(pop.owning_group, len(linked))
+            if scope is None:
+                return []
+            whole = scope == "group"
+        self.record()
+        try:
+            changed = self.ws.rename_population(a.name, path, new, whole_group=whole)
+        except ValueError as exc:
+            self.history.undo()
+            QtWidgets.QMessageBox.warning(self, "Rename", str(exc))
+            return []
+        for g in self.graphs:  # windows showing the old path follow the new name
+            if g.sample_name in changed and g.path[: len(path)] == path:
+                g.path = path[:-1] + (new,) + g.path[len(path):]
+        self.data_changed(changed)
+        self.select(a.name, path[:-1] + (new,))
+        return changed
+
+    def rename_group_dialog(self) -> str | None:
+        old = self.current_group()
+        if old == ALL_SAMPLES:
+            return None
+        new = self.ask_text("Rename Group", "New name:", old)
+        if not new or new == old:
+            return None
+        self.record()
+        try:
+            self.ws.rename_group(old, new)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Rename Group", str(exc))
+            return None
+        self.refresh_groups(select=new)
+        self.data_changed(list(self.samples))
+        return new
+
+    def new_keyword_group(self, name: str, criteria) -> str | None:
+        self.record()
+        try:
+            self.ws.create_group(name, criteria=criteria)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Group", str(exc))
+            return None
+        self.refresh_groups(select=name)
+        return name
+
+    def new_keyword_group_dialog(self) -> None:
+        name, key = QtWidgets.QLineEdit(), self._keyword_combo()
+        op = QtWidgets.QComboBox()
+        op.addItems(["equals", "contains", "starts with"])
+        value = QtWidgets.QLineEdit()
+        if self._form("New Group by Keyword", [("Group name", name), ("Keyword", key), ("", op), ("Value", value)]):
+            if name.text().strip() and key.currentText().strip():
+                self.new_keyword_group(name.text().strip(),
+                                       [Criterion(key.currentText().strip(), value.text(), op.currentText())])
+
+    def _tree_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        self.tree.setCurrentItem(item)
+        m = QtWidgets.QMenu(self)
+        m.addAction("Open Graph", lambda: self.open_graph_for_item(item))
+        m.addAction("Add Statistic…", self.add_stat_dialog)
+        if item.parent() is not None and item.data(0, STAT_ROLE) is None:
+            m.addAction("Rename…", self.rename_selected)
+        m.addAction("Sample Properties…", lambda: self.sample_properties(item.data(0, ROLE)[0]))
+        m.addSeparator()
+        m.addAction("Delete", self.delete_selected_gate)
+        m.popup(self.tree.viewport().mapToGlobal(pos))
 
     def add_samples_dialog(self):
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Add Samples", "", "FCS files (*.fcs *.FCS);;All files (*)")
@@ -232,12 +992,15 @@ class MainWindow(QtWidgets.QMainWindow):
         """Remember the state before a change, for Undo."""
         self.history.record()
         self._sync_undo()
+        self.mark_dirty()
 
     def _sync_undo(self) -> None:
         self.undo_action.setEnabled(self.history.can_undo)
         self.redo_action.setEnabled(self.history.can_redo)
 
     def _after_history(self, names) -> list[str]:
+        self.mark_dirty()
+        self.refresh_keywords()
         self.refresh_groups()
         self.data_changed(names)
         self._sync_undo()
@@ -268,8 +1031,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def visible_samples(self) -> list[str]:
         """Samples of the current group, in workspace order (graph window ◀ ▶)."""
-        members = set(self.ws.group(self.current_group()).samples)
-        return [n for n in self.samples if n in members]
+        out = []
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            if not it.isHidden():
+                out.append(it.data(0, ROLE)[0])
+        return out
 
     # --- selection ----------------------------------------------------------
     def selection(self) -> tuple[AnalyzedSample, tuple[str, ...]] | tuple[None, None]:
@@ -307,6 +1074,32 @@ class MainWindow(QtWidgets.QMainWindow):
             if name not in names:
                 names.append(name)
         return names
+
+    def statistics_of(self, items) -> list[tuple[str, tuple[str, ...], StatSpec]]:
+        out = []
+        for it in items:
+            if it is not None and it.data(0, STAT_ROLE) is not None:
+                name, path = it.data(0, ROLE)
+                out.append((name, tuple(path), it.data(0, STAT_ROLE)))
+        return out
+
+    def drop_stats_on_group(self, stats, group: str) -> list[str]:
+        """Statistic nodes dropped on a group: add them to the same population in every sample."""
+        self.record()
+        done = []
+        for _, path, spec in stats:
+            done += self.ws.copy_statistic(spec, path, self.ws.group(group).samples)
+        self.data_changed(done)
+        return done
+
+    def drop_stats_on_population(self, stats, sample: str, path) -> list[str]:
+        """Statistic nodes dropped on a population: add them there."""
+        self.record()
+        done = []
+        for _, _, spec in stats:
+            done += self.ws.copy_statistic(spec, tuple(path), [sample])
+        self.data_changed(done)
+        return done
 
     def populations_of(self, items) -> list[tuple[str, tuple[str, ...]]]:
         """(sample, path) of tree items, skipping statistic rows; a sample row means its whole tree."""
@@ -396,9 +1189,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _group_changed(self) -> None:
         """Show only the samples of the selected group."""
         members = set(self.ws.group(self.current_group()).samples)
+        text = self.filter_edit.text().strip().lower()
         for i in range(self.tree.topLevelItemCount()):
             it = self.tree.topLevelItem(i)
-            it.setHidden(it.data(0, ROLE)[0] not in members)
+            name = it.data(0, ROLE)[0]
+            match = not text or text in name.lower() or any(
+                text in v.lower() for v in self.samples[name].keywords.values())
+            it.setHidden(name not in members or not match)
         cur = self.tree.currentItem()
         if cur is None or cur.isHidden():
             visible = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())
@@ -473,16 +1270,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.drop_on_group(self.populations_of(items), self.current_group())
 
     # --- statistics ----------------------------------------------------------
-    def ask_stat(self, a: AnalyzedSample):
+    def ask_stat(self, a: AnalyzedSample, path=()):
         """Show the Add Statistic dialog; returns a StatSpec or None (replaced in tests)."""
-        dlg = StatDialog([(p.name, p.label) for p in a.ps.parameters], self)
+        path = tuple(path)
+        dlg = StatDialog([(p.name, p.label) for p in a.ps.parameters], self,
+                         ancestors=[path[:i] for i in range(len(path) - 1)])
         return dlg.spec() if dlg.exec() else None
 
     def add_stat_dialog(self):
         a, path = self.selection()
         if a is None:
             return
-        spec = self.ask_stat(a)
+        spec = self.ask_stat(a, path)
         if spec is None:
             return
         self.record()
@@ -521,6 +1320,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return {whole: "group", one: "sample"}.get(box.clickedButton())
 
     def closeEvent(self, e):
+        if not self._ok_to_replace():
+            e.ignore()
+            return
         for g in list(self.graphs):
             g.close()
+        self.close_table_editors()
+        self.close_layout_editors()
         super().closeEvent(e)

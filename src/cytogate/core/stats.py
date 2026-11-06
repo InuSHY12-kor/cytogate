@@ -29,7 +29,10 @@ from enum import Enum
 
 import numpy as np
 
-__all__ = ["Stat", "GeoMean", "StatSpec", "compute", "PARAMETER_STATS", "FREQUENCY_STATS", "column_name"]
+__all__ = ["Stat", "GeoMean", "StatMode", "StatSpec", "compute", "PARAMETER_STATS", "FREQUENCY_STATS",
+           "column_name", "BINS"]
+
+BINS = 4096  # FlowJo bins events into 4096 channels per axis for statistics
 
 
 class Stat(str, Enum):
@@ -37,6 +40,7 @@ class Stat(str, Enum):
     FREQ_PARENT = "Freq. of Parent"
     FREQ_GRANDPARENT = "Freq. of Grandparent"
     FREQ_TOTAL = "Freq. of Total"
+    FREQ_OF = "Freq. of"  # … a chosen upstream population
     MEAN = "Mean"
     MEDIAN = "Median"
     GEOMEAN = "Geometric Mean"
@@ -50,12 +54,17 @@ class Stat(str, Enum):
     PERCENTILE = "Percentile"
 
 
+class StatMode(str, Enum):
+    FLOWJO = "flowjo"  # values binned on the axis (4096 channels) first, as FlowJo does
+    EXACT = "exact"  # raw event values
+
+
 class GeoMean(str, Enum):
     GRAPH = "graph"  # FlowJo 10: in the axis transform's space
     CLASSIC = "classic"  # exp(mean(ln x)), positive values only
 
 
-FREQUENCY_STATS = (Stat.COUNT, Stat.FREQ_PARENT, Stat.FREQ_GRANDPARENT, Stat.FREQ_TOTAL)
+FREQUENCY_STATS = (Stat.COUNT, Stat.FREQ_PARENT, Stat.FREQ_GRANDPARENT, Stat.FREQ_TOTAL, Stat.FREQ_OF)
 PARAMETER_STATS = tuple(s for s in Stat if s not in FREQUENCY_STATS)
 LO_PCT, HI_PCT = 15.87, 84.13  # +-1 SD of a normal distribution
 
@@ -67,8 +76,13 @@ class StatSpec:
     stat: Stat
     parameter: str | None = None  # needed for PARAMETER_STATS
     percentile: float | None = None  # for Stat.PERCENTILE
+    ancestor: tuple[str, ...] | None = None  # for Stat.FREQ_OF: the upstream population
 
     def __post_init__(self):
+        if self.ancestor is not None:
+            object.__setattr__(self, "ancestor", tuple(self.ancestor))
+        if self.stat == Stat.FREQ_OF and self.ancestor is None:
+            raise ValueError("Freq. of needs an upstream population")
         if self.stat in PARAMETER_STATS and not self.parameter:
             raise ValueError(f"{self.stat.value} needs a parameter")
         if self.stat == Stat.PERCENTILE and self.percentile is None:
@@ -76,9 +90,7 @@ class StatSpec:
 
     def label(self, parameter_label: str | None = None) -> str:
         """FlowJo node name, e.g. "Median : Comp-APC-A" or "Freq. of Parent"."""
-        name = self.stat.value
-        if self.stat == Stat.PERCENTILE:
-            name = f"{self.percentile:g}th Percentile"
+        name = _stat_name(self)
         if self.parameter:
             return f"{name} : {parameter_label or self.parameter}"
         return name
@@ -87,17 +99,26 @@ class StatSpec:
 def column_name(path: tuple[str, ...], spec: StatSpec, parameter_label: str | None = None) -> str:
     """FlowJo Table Editor column header: "Lymphocytes/CD3+ | Median (Comp-APC-A :: CD3)"."""
     pop = "/".join(path) if path else "Ungated"
-    name = spec.stat.value if spec.stat != Stat.PERCENTILE else f"{spec.percentile:g}th Percentile"
+    name = _stat_name(spec)
     if spec.parameter:
         return f"{pop} | {name} ({parameter_label or spec.parameter})"
     return f"{pop} | {name}"
+
+
+def _stat_name(spec: StatSpec) -> str:
+    if spec.stat == Stat.PERCENTILE:
+        return f"{spec.percentile:g}th Percentile"
+    if spec.stat == Stat.FREQ_OF:
+        return f"Freq. of {spec.ancestor[-1] if spec.ancestor else 'Ungated'}"
+    return spec.stat.value
 
 
 def _pct(n: int, d: int) -> float:
     return 100.0 * n / d if d else math.nan
 
 
-def compute(analysis, path, spec: StatSpec, geomean: GeoMean = GeoMean.GRAPH) -> float:
+def compute(analysis, path, spec: StatSpec, geomean: GeoMean = GeoMean.GRAPH,
+            mode: StatMode = StatMode.FLOWJO) -> float:
     """Value of `spec` for population `path` of an AnalyzedSample."""
     path = tuple(path)
     n = analysis.count(path)
@@ -109,17 +130,40 @@ def compute(analysis, path, spec: StatSpec, geomean: GeoMean = GeoMean.GRAPH) ->
         return _pct(n, analysis.count(path[:-2])) if len(path) >= 2 else math.nan
     if spec.stat == Stat.FREQ_TOTAL:
         return _pct(n, analysis.ps.event_count)
+    if spec.stat == Stat.FREQ_OF:
+        anc = spec.ancestor
+        if path[: len(anc)] != anc or len(anc) >= len(path):
+            return math.nan  # not an upstream population of this one
+        return _pct(n, analysis.count(anc))
 
     ps = analysis.ps
     pname = ps.parameter(spec.parameter).name
     x = ps.values(pname)[analysis.mask(path)]
     if x.size == 0:
         return math.nan
-    return parameter_stat(x, spec, ps.transforms[pname], geomean)
+    return parameter_stat(x, spec, ps.transforms[pname], geomean, mode)
 
 
-def parameter_stat(x: np.ndarray, spec: StatSpec, xf=None, geomean: GeoMean = GeoMean.GRAPH) -> float:
+def binned(x: np.ndarray, xf) -> tuple[np.ndarray, np.ndarray]:
+    """FlowJo's binning: (bin index 0..4095 on the axis, value at the bin centre)."""
+    pos = np.clip(np.nan_to_num(xf.apply(np.asarray(x, dtype=float)), nan=0.0), 0.0, 1.0)
+    idx = np.minimum((pos * BINS).astype(np.int64), BINS - 1)
+    centres = xf.inverse((np.arange(BINS) + 0.5) / BINS)
+    return idx, centres[idx]
+
+
+def parameter_stat(x: np.ndarray, spec: StatSpec, xf=None, geomean: GeoMean = GeoMean.GRAPH,
+                   mode: StatMode = StatMode.EXACT) -> float:
+    """A per-parameter statistic of the values `x`.
+
+    mode=FLOWJO first replaces each value by the centre of its bin on the axis
+    (4096 bins), as FlowJo documents ("almost all statistics are calculated on
+    the binned values, then translated back to scale values").
+    """
     s = spec.stat
+    idx = None
+    if mode == StatMode.FLOWJO and xf is not None:
+        idx, x = binned(x, xf)
     if s == Stat.MEAN:
         return float(np.mean(x))
     if s == Stat.MEDIAN:
@@ -131,7 +175,15 @@ def parameter_stat(x: np.ndarray, spec: StatSpec, xf=None, geomean: GeoMean = Ge
         return 100.0 * float(np.std(x, ddof=1)) / m if x.size > 1 and m != 0 else math.nan
     if s in (Stat.ROBUST_SD, Stat.ROBUST_CV):
         lo, med, hi = np.percentile(x, [LO_PCT, 50.0, HI_PCT])
-        rsd = ((hi - med) + (med - lo)) / 2.0
+        upper, lower = hi - med, med - lo
+        rsd = (upper + lower) / 2.0
+        if idx is not None:
+            # FlowJo: if one end of the ±1 SD range is off scale, use the other
+            p_lo, p_hi = np.percentile(idx, [LO_PCT, HI_PCT])
+            if p_hi >= BINS - 1 and p_lo > 0:
+                rsd = lower
+            elif p_lo <= 0 and p_hi < BINS - 1:
+                rsd = upper
         if s == Stat.ROBUST_SD:
             return float(rsd)
         return 100.0 * float(rsd) / float(med) if med != 0 else math.nan

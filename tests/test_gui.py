@@ -39,6 +39,7 @@ def release(w):
     """Close a workspace window and free its sample data (each holds ~160 MB)."""
     import gc
     w.close_all_graphs()
+    w.dirty = False  # don't ask to save
     w.close()
     w.ws.samples.clear()
     w.history._undo.clear()
@@ -492,7 +493,7 @@ def test_statistics(win, g, monkeypatch):
     g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
     win.select(E01, ("Rectangle",))
     spec = StatSpec(Stat.MEDIAN, "Comp-CD3 APC-H7 FLR-A")
-    monkeypatch.setattr(win, "ask_stat", lambda a: spec)
+    monkeypatch.setattr(win, "ask_stat", lambda a, *_: spec)
     win.add_stat_dialog()
     item = win.find_item(E01, ("Rectangle",))
     stat_rows = [item.child(i) for i in range(item.childCount()) if item.child(i).text(0).startswith("Σ")]

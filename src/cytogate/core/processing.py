@@ -86,6 +86,18 @@ class ProcessedSample:
             for name, xf in transforms.items():
                 self.set_transform(name, xf)
 
+    @staticmethod
+    def parameter_names(sample, compensation) -> list[Parameter]:
+        """The parameters a sample would have with this compensation (no data work)."""
+        out = [Parameter(c.pnn, c.pns, "time" if c.is_time else "scatter" if c.is_scatter else "fluorescence",
+                         False, c.range) for c in sample.channels]
+        if compensation is not None:
+            stains = {c.pnn: c.pns for c in sample.channels}
+            ranges = {c.pnn: c.range for c in sample.channels}
+            out += [Parameter(compensation.comp_name(d), stains.get(d, ""), "fluorescence", True, ranges.get(d, 0.0))
+                    for d in compensation.detectors]
+        return out
+
     @property
     def event_count(self) -> int:
         return self._data.shape[0]

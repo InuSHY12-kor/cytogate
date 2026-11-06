@@ -90,3 +90,19 @@ def test_real_sample_counts(data_dir):
     ps = ProcessedSample(load_fcs(data_dir / "8_color_data_set/fcs_files/101_DEN084Y5_15_E01_008_clean.fcs"))
     r = render_2d(ps.scaled("FSC-A"), ps.scaled("SSC-A"), PlotType.PSEUDOCOLOR)
     assert r.counts.sum() == ps.event_count == 290172
+
+
+def test_pixel_medians_and_color_mapping():
+    from cytogate.plots import PSEUDOCOLOR_LUT
+    from cytogate.plots.render import pixel_medians
+    x = np.array([0.1, 0.1, 0.1, 0.9])
+    y = np.array([0.1, 0.1, 0.1, 0.9])
+    c = np.array([0.2, 0.9, 0.4, 0.7])
+    med = pixel_medians(x, y, c, 10)
+    assert med[1, 1] == pytest.approx(0.4) and med[9, 9] == pytest.approx(0.7) and np.isnan(med[0, 0])
+    c2 = np.array([0.2, 0.9, 0.4, 0.5])
+    assert pixel_medians(x[[0, 1, 3]], y[[0, 1, 3]], c2[[0, 1, 3]], 10)[1, 1] == pytest.approx(0.55)  # even count
+    r = render_2d(x, y, PlotType.DOT, res=10, color_by=c)
+    assert tuple(r.image[9, 9]) == tuple(PSEUDOCOLOR_LUT[int(0.7 * 255)])
+    r = render_2d(X, Y, PlotType.CONTOUR, res=128, level=0.10)
+    assert 7 <= r.levels.size <= 10  # 10% steps
