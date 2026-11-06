@@ -121,3 +121,26 @@ def test_offset_quadrant_arms(win):
     g.quad_arm_moved(0, (0.4, 0.4))  # centre: straightens and moves everything
     _, sp = g.quad_set()
     assert sp["x_upper"] == sp["x_lower"] and sp["y_left"] == sp["y_right"]
+
+
+def test_export_dialog(win, tmp_path):
+    from cytogate.io import load_fcs
+    win.samples[E01].add_gate((), "Big", RectangleGate(("FSC-A",), (80000.0,), (None,)))
+    win.data_changed([E01])
+    win.tree.clearSelection()
+    win.find_item(E01, ("Big",)).setSelected(True)
+    win.sample_item(E03).setSelected(True)
+    dlg = win.export_dialog(show=False)
+    assert dlg.items == [(E01, ("Big",)), (E03, ())]
+    dlg.folder.setText(str(tmp_path))
+    files = dlg.run()
+    assert sorted(f.name for f in files) == sorted([
+        "export_101_DEN084Y5_15_E01_008_clean_Big.fcs", "export_101_DEN084Y5_15_E03_009_clean_Ungated.fcs"])
+    dlg = win.export_dialog(show=False)
+    dlg.folder.setText(str(tmp_path))
+    dlg.concat.setChecked(True)
+    dlg.limit.setChecked(True)
+    dlg.limit_n.setValue(500)
+    [cat] = dlg.run()
+    b = load_fcs(cat)
+    assert b.event_count == 1000 and "SampleID" in [c.pnn for c in b.channels]

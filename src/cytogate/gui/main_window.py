@@ -226,6 +226,8 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addSeparator()
         m.addAction("Add Samples…", self.add_samples_dialog)
         m.addAction("Add Folder…", self.add_folder_dialog)
+        m.addSeparator()
+        m.addAction("Export / Concatenate Populations…", self.export_dialog)
         g = self.menuBar().addMenu("Groups")
         g.addAction("New Group from Selection…", self.new_group_dialog)
         g.addAction("New Group by Keyword…", self.new_keyword_group_dialog)
@@ -562,6 +564,22 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = SamplePropertiesDialog(self.samples[name], self)
         dlg.keywords_changed.connect(lambda changes: [self.set_keyword([name], k, v) for k, v in changes.items()])
         dlg.show()
+        return dlg
+
+    # --- data export -----------------------------------------------------------------------
+    def export_items(self) -> list[tuple[str, tuple[str, ...]]]:
+        """Selected populations/samples; with nothing selected, the samples of the current group."""
+        items = self.populations_of(self.tree.selectedItems())
+        return items or [(n, ()) for n in self.ws.group(self.current_group()).samples]
+
+    def export_dialog(self, show: bool = True):
+        from .export_dialog import ExportDialog
+        items = self.export_items()
+        if not items:
+            return None
+        dlg = ExportDialog(self, items, self)
+        if show:
+            dlg.exec()
         return dlg
 
     # --- Boolean gates and BifurGate -----------------------------------------------------------
