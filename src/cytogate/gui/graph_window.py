@@ -28,6 +28,14 @@ from ..core.analysis import AnalyzedSample
 from ..core.gating import move_vertex, scale_gate, translate_gate
 from ..plots import HistogramY, PlotType
 from .gate_tools import HISTOGRAM_TOOLS, TOOLS
+from .icons import icon
+
+TOOL_TIPS = {
+    "Rectangle": "Rectangle gate — drag a box", "Polygon": "Polygon gate — click points, double-click to close",
+    "Ellipse": "Ellipse gate — drag the bounding box", "Quadrant": "Quadrant gate — click the crossing point",
+    "Spider": "Spider gate — click the centre", "Curly Quad": "Curly quadrant — click the centre",
+    "Range": "Range gate (histogram) — drag across", "Bisector": "Bisector (histogram) — click the split point",
+}
 from .plot_view import IMAGE_FORMATS, PlotView
 from .stat_dialog import format_stat
 from .transform_dialog import starter_transform
@@ -336,6 +344,11 @@ class GraphWindow(QtWidgets.QWidget):
         self.next_btn.clicked.connect(lambda: self._arrow(+1))
         self.up_btn.clicked.connect(self.go_up)
         self.down_btn.clicked.connect(self.go_down)
+        for b, name in ((self.undo_btn, "undo"), (self.redo_btn, "redo"), (self.prev_btn, "left"),
+                        (self.next_btn, "right"), (self.up_btn, "up"), (self.down_btn, "down")):
+            b.setIcon(icon(name))
+            b.setIconSize(QtCore.QSize(20, 20))
+            b.setAutoRaise(True)
         for b in (self.undo_btn, self.redo_btn):
             nav.addWidget(b)
         nav.addSpacing(6)
@@ -348,14 +361,26 @@ class GraphWindow(QtWidgets.QWidget):
         nav.addStretch(1)
         self.dup_btn = QtWidgets.QToolButton(text="⧉", toolTip="Duplicate View")
         self.dup_btn.clicked.connect(self.duplicate_view)
+        self.dup_btn.setIcon(icon("duplicate"))
+        self.dup_btn.setIconSize(QtCore.QSize(20, 20))
+        self.dup_btn.setAutoRaise(True)
         nav.addWidget(self.dup_btn)
 
         self.tool_bar = QtWidgets.QToolBar()
         self.tool_group = QtGui.QActionGroup(self)
         self.tool_group.setExclusionPolicy(QtGui.QActionGroup.ExclusionPolicy.ExclusiveOptional)
         self.tool_actions: dict[str, QtGui.QAction] = {}
+        self.tool_bar.setIconSize(QtCore.QSize(22, 22))
+        self.tool_bar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.pointer_action = self.tool_bar.addAction(icon("Pointer"), "Pointer")
+        self.pointer_action.setToolTip("Select / move gates (Esc)")
+        self.pointer_action.setCheckable(True)
+        self.pointer_action.setChecked(True)
+        self.tool_group.addAction(self.pointer_action)
         for tool in TOOLS:
-            act = self.tool_bar.addAction(tool)
+            act = self.tool_bar.addAction(icon(tool), tool)
+            act.setToolTip(TOOL_TIPS.get(tool, tool))
+            act.setData(tool)
             act.setCheckable(True)
             self.tool_group.addAction(act)
             self.tool_actions[tool] = act
@@ -729,7 +754,8 @@ class GraphWindow(QtWidgets.QWidget):
             [(c.name, c.gate, a.freq_of_parent(c.path), c.label_offset, (a.name, c.path), c.tint)
              for c in children if c.gate.dims],
             on_label_moved=self.label_moved, on_gate_moved=self.gate_moved,
-            active=self.active, on_select=self.select_gate, on_vertex_moved=self.vertex_moved)
+            active=self.active, on_select=self.select_gate, on_vertex_moved=self.vertex_moved,
+            on_open=self.open_gate_window)
         self._quad_handles()
         self._edge_warning(mask)
         n = a.count(self.path)
@@ -845,7 +871,23 @@ class GraphWindow(QtWidgets.QWidget):
     # --- gating -----------------------------------------------------------------------
     def _tool_changed(self, *_) -> None:
         act = self.tool_group.checkedAction()
-        self.view.viewbox.set_tool(act.text() if act else None)
+        tool = act.data() if act is not None else None
+        if tool is None and not self.pointer_action.isChecked():
+            self.pointer_action.setChecked(True)  # a tool switched off -> back to the pointer
+        self.view.viewbox.set_tool(tool)
+
+    def open_gate_window(self, key) -> "GraphWindow":
+        """Double-click inside a gate: that population in a new graph window."""
+        sample, path = key
+        before = len(self.main.graphs)
+        g = self.main.open_graph(sample, path)  # brings an existing window forward
+        if len(self.main.graphs) > before:  # a new one: put it beside this window, like FlowJo
+            g.move(self.geometry().right() + 8, self.geometry().top())
+        return g
+
+    def select_pointer(self) -> None:
+        self.pointer_action.setChecked(True)
+        self.view.viewbox.set_tool(None)
 
     def _sync_tools(self, *_) -> None:
         hist = self.y is None
@@ -854,6 +896,7 @@ class GraphWindow(QtWidgets.QWidget):
             act.setEnabled(ok)
             if not ok and act.isChecked():
                 act.setChecked(False)
+                self.pointer_action.setChecked(True)
                 self.view.viewbox.set_tool(None)
 
     def suggested_name(self) -> str:
@@ -1106,6 +1149,9 @@ class GraphWindow(QtWidgets.QWidget):
             if k in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace):
                 self.clear_active_gate()
                 return
+        if k == QtCore.Qt.Key.Key_Escape and self.view.viewbox.tool is not None:
+            self.select_pointer()  # cancel drawing, back to the pointer
+            return
         if k == QtCore.Qt.Key.Key_Escape and self.active is not None:
             self.active = None
             self.redraw()

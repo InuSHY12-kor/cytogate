@@ -119,12 +119,13 @@ class GateShape(pg.PlotCurveItem):
     (only while no gate tool is active). `on_moved(dx, dy)` gets the shift in
     display units."""
 
-    def __init__(self, pts, viewbox, y_scale, on_moved, on_click=None, active=False, tint=None):
+    def __init__(self, pts, viewbox, y_scale, on_moved, on_click=None, active=False, tint=None, on_open=None):
         super().__init__(pts[:, 0], pts[:, 1], pen=ACTIVE_PEN if active else GATE_PEN)
         self.vb = viewbox
         self.y_scale = y_scale
         self.on_moved = on_moved
         self.on_click = on_click
+        self.on_open = on_open  # double-click: open the gated population
         self.active = active
         path = QtGui.QPainterPath()
         path.addPolygon(QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in pts]))
@@ -142,7 +143,8 @@ class GateShape(pg.PlotCurveItem):
         return self.vb.tool is None
 
     def shape(self):
-        return self._area if (self.on_moved is not None or self.on_click is not None) else super().shape()
+        return self._area if (self.on_moved is not None or self.on_click is not None or self.on_open is not None) \
+            else super().shape()
 
     def paint(self, p, *args):
         if self._tint is not None:  # FlowJo "Tint": fill the gate area
@@ -152,7 +154,13 @@ class GateShape(pg.PlotCurveItem):
         super().paint(p, *args)
 
     def mouseClickEvent(self, ev):
-        if ev.button() == QtCore.Qt.MouseButton.LeftButton and self._free() and self.on_click:
+        if ev.button() != QtCore.Qt.MouseButton.LeftButton or not self._free():
+            ev.ignore()
+            return
+        if ev.double() and self.on_open:
+            ev.accept()
+            self.on_open()
+        elif self.on_click:
             ev.accept()
             self.on_click()
         else:
@@ -173,26 +181,45 @@ class GateShape(pg.PlotCurveItem):
 
 
 class GateHandle(pg.GraphicsObject):
-    """Small square on a vertex/corner of the active gate; drag it to reshape."""
+    """Square on a vertex/corner of the active gate; drag it to reshape.
 
-    SIZE = 7
+    The square is small but the area that grabs it is HIT pixels around the
+    vertex, and the cursor turns into a move cross over it."""
+
+    SIZE = 7  # drawn square, pixels
+    HIT = 12  # grab radius, pixels
 
     def __init__(self, index: int, pos, viewbox, y_scale, on_moved):
         super().__init__()
         self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
         self.index, self.vb, self.y_scale, self.on_moved = index, viewbox, y_scale, on_moved
         self.setPos(float(pos[0]), float(pos[1] * y_scale))
-        self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+        self.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
+        self.setAcceptHoverEvents(True)
+        self.hovered = False
         self.setZValue(25)
 
     def boundingRect(self):
-        s = self.SIZE
-        return QtCore.QRectF(-s, -s, 2 * s, 2 * s)
+        h = self.HIT
+        return QtCore.QRectF(-h, -h, 2 * h, 2 * h)
+
+    def shape(self):
+        path = QtGui.QPainterPath()
+        path.addEllipse(QtCore.QPointF(0, 0), self.HIT, self.HIT)
+        return path
+
+    def hoverEvent(self, ev):
+        on = not ev.isExit()
+        if on:
+            ev.acceptDrags(QtCore.Qt.MouseButton.LeftButton)
+        if on != self.hovered:
+            self.hovered = on
+            self.update()
 
     def paint(self, p, *args):
-        s = self.SIZE / 2 + 1
-        p.setPen(pg.mkPen((0, 0, 0)))
-        p.setBrush(pg.mkBrush((0, 0, 0)))
+        s = (self.SIZE + 3 if self.hovered else self.SIZE) / 2 + 1
+        p.setPen(pg.mkPen((255, 255, 255) if self.hovered else (0, 0, 0)))
+        p.setBrush(pg.mkBrush((220, 0, 0) if self.hovered else (0, 0, 0)))
         p.drawRect(QtCore.QRectF(-s, -s, 2 * s, 2 * s))
 
     def mouseDragEvent(self, ev):
@@ -300,7 +327,7 @@ class PlotView(QtWidgets.QWidget):
         self.gate_items = []
 
     def show_gates(self, ps: ProcessedSample, x: str, y: str | None, gates, on_label_moved=None,
-                   on_gate_moved=None, active=None, on_select=None, on_vertex_moved=None) -> list[str]:
+                   on_gate_moved=None, active=None, on_select=None, on_vertex_moved=None, on_open=None) -> list[str]:
         """Outline child gates that use these axes.
 
         `gates` = [(name, gate, freq %, label offset, key)] or with a 6th item,
@@ -308,7 +335,8 @@ class PlotView(QtWidgets.QWidget):
         `on_label_moved(key, offset)`. Gates other than quadrants can be dragged:
         `on_gate_moved(key, dx, dy)` (display units). Clicking a gate calls
         `on_select(key)`; the gate whose key is `active` gets handles, which call
-        `on_vertex_moved(key, index, (x, y))`. Returns the names drawn.
+        `on_vertex_moved(key, index, (x, y))`. Double-clicking inside a gate calls
+        `on_open(key)`. Returns the names drawn.
         """
         self.clear_gates()
         drawn = []
@@ -328,7 +356,8 @@ class PlotView(QtWidgets.QWidget):
             curve = GateShape(pts, self.viewbox, top,
                               (lambda dx, dy, k=key: on_gate_moved(k, dx, dy)) if movable else None,
                               on_click=(lambda k=key: on_select(k)) if on_select else None,
-                              active=is_active, tint=tint)
+                              active=is_active, tint=tint,
+                              on_open=(lambda k=key: on_open(k)) if on_open else None)
             short = quad.group(1) if quad and y is not None else name
             text = "\n".join(t for t, show in ((short, opts.show_gate_names), (f"{freq:.3g}", opts.show_gate_freqs)) if show)
             if quad and y is not None:

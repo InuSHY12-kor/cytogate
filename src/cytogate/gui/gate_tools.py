@@ -20,6 +20,7 @@ TOOLS = ("Rectangle", "Polygon", "Ellipse", "Quadrant", "Spider", "Curly Quad", 
 CLICK_TOOLS = ("Quadrant", "Spider", "Curly Quad", "Bisector")  # one click places the gate
 HISTOGRAM_TOOLS = ("Range", "Bisector")
 PREVIEW_PEN = pg.mkPen((220, 0, 0), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
+GUIDE_PEN = pg.mkPen((220, 0, 0), width=1, style=QtCore.Qt.PenStyle.DotLine)
 CLOSE_DISTANCE = 0.015  # display units
 
 
@@ -48,11 +49,46 @@ class GateViewBox(pg.ViewBox):
         self.preview = pg.PlotCurveItem(pen=PREVIEW_PEN)
         self.preview.setZValue(50)
         self.addItem(self.preview, ignoreBounds=True)
+        self._hooked = False
+        self.guide = pg.PlotCurveItem(pen=GUIDE_PEN, connect="finite")  # crosshair for click tools
+        self.guide.setZValue(50)
+        self.addItem(self.guide, ignoreBounds=True)
 
     def set_tool(self, tool: str | None) -> None:
         self.tool = tool
         self._poly = []
         self.preview.clear()
+        self.guide.clear()
+        if not self._hooked and self.scene() is not None:
+            self.scene().sigMouseMoved.connect(self._mouse_moved)
+            self._hooked = True
+
+    # --- following the mouse: live preview ---------------------------------------
+    def _mouse_moved(self, scene_pos) -> None:
+        if self.tool is None:
+            return
+        if not self.sceneBoundingRect().contains(scene_pos):
+            self.guide.clear()
+            return
+        self.hover(_clip(self.mapSceneToView(scene_pos)))
+
+    def hover(self, p) -> None:
+        """Show what the next click would draw: the open polygon with a rubber-band
+        segment to the cursor and a dashed closing line, or a crosshair."""
+        x, y = p
+        if self.tool == "Polygon" and self._poly:
+            pts = self._poly + [p]
+            if len(self._poly) >= 2:
+                pts = pts + [self._poly[0]]  # where it will close
+            self.preview.setData([q[0] for q in pts], [q[1] for q in pts])
+        elif self.tool in ("Quadrant", "Spider", "Curly Quad"):
+            top = 1.0
+            self.guide.setData([x, x, np.nan, 0.0, 1.0], [0.0, top, np.nan, y, y])
+        elif self.tool == "Bisector":
+            top = self.viewRange()[1][1]
+            self.guide.setData([x, x], [0.0, top])
+        else:
+            self.guide.clear()
 
     # --- drags: rectangle, ellipse, range --------------------------------------
     def mouseDragEvent(self, ev, axis=None):
@@ -92,6 +128,7 @@ class GateViewBox(pg.ViewBox):
         ev.accept()
         p = _clip(self.mapSceneToView(ev.scenePos()))
         if self.tool in CLICK_TOOLS:
+            self.guide.clear()
             self.shapeDrawn.emit(self.tool, [p])
             return
         self.add_polygon_point(p, close=ev.double())
