@@ -106,7 +106,7 @@ class SampleTree(QtWidgets.QTreeWidget):
             item = self.itemAt(e.position().toPoint())
             if item is not None:
                 name, path = item.data(0, ROLE)
-                pops, stats = decode_populations(md), decode_statistics(md)
+                pops, stats = self.main.own(decode_populations(md)), self.main.own(decode_statistics(md))
                 if pops:
                     self.main.drop_on_sample(pops, name)
                 if stats:  # FlowJo: a statistic dropped on a population is added there
@@ -141,7 +141,8 @@ class GroupTable(QtWidgets.QTreeWidget):
         item = self.itemAt(e.position().toPoint())
         if item is not None:
             group = item.data(0, ROLE)
-            pops, stats = decode_populations(e.mimeData()), decode_statistics(e.mimeData())
+            pops = self.main.own(decode_populations(e.mimeData()))
+            stats = self.main.own(decode_statistics(e.mimeData()))
             if pops:
                 self.main.drop_on_group(pops, group)
             if stats:
@@ -150,8 +151,13 @@ class GroupTable(QtWidgets.QTreeWidget):
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    windows: list["MainWindow"] = []  # every open workspace window
+
     def __init__(self):
         super().__init__()
+        used = {w.untitled_no for w in MainWindow.open_windows()}
+        self.untitled_no = next(n for n in range(1, len(used) + 2) if n not in used)
+        MainWindow.windows.append(self)
         self.resize(640, 760)
         self.ws = Workspace()
         self.samples: dict[str, AnalyzedSample] = self.ws.samples  # same dict
@@ -221,12 +227,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_menu(self) -> None:
         m = self.menuBar().addMenu("File")
-        for text, slot, key in (("New Workspace", self.new_workspace, "Ctrl+N"),
+        for text, slot, key in (("New Workspace", self.new_workspace_window, "Ctrl+N"),
                                 ("Open Workspace…", self.open_workspace_dialog, "Ctrl+O"),
                                 ("Save", self.save, "Ctrl+S"),
                                 ("Save As…", self.save_as_dialog, "Ctrl+Shift+S")):
             a = m.addAction(text, slot)
             a.setShortcut(QtGui.QKeySequence(key))
+        m.addAction("Close Workspace", self.close)
         m.addSeparator()
         m.addAction("Add Samples…", self.add_samples_dialog)
         m.addAction("Add Folder…", self.add_folder_dialog)
@@ -257,6 +264,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     lambda: self.apply_compensation(None, self.selected_sample_names()))
         c.addSeparator()
         c.addAction("Copy Transforms to Current Group", self.copy_transforms_to_group)
+        self.window_menu = self.menuBar().addMenu("Window")
+        self.window_menu.aboutToShow.connect(self._fill_window_menu)
         t = self.menuBar().addMenu("Reports")
         t.addAction("New Table…", lambda: self.open_table_editor(None))
         self.tables_menu = t.addMenu("Open Table")
@@ -269,7 +278,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- saving / opening ----------------------------------------------------------------
     def _update_title(self) -> None:
-        name = self.path.name if self.path else "Untitled"
+        name = self.path.name if self.path else ("Untitled" if self.untitled_no == 1 else f"Untitled {self.untitled_no}")
         self.setWindowTitle(f"CytoGate — {name}{' *' if self.dirty else ''}")
 
     def mark_dirty(self) -> None:
@@ -409,7 +418,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.dirty or not self.samples:
             return None
         target = (self.path.with_name(self.path.stem + ".autosave.wsp") if self.path
-                  else Path.home() / "CytoGate-autosave.wsp")
+                  else Path.home() / ("CytoGate-autosave.wsp" if self.untitled_no == 1
+                                      else f"CytoGate-autosave-{self.untitled_no}.wsp"))
         try:
             write_wsp(target, self.ws, extras=self.collect_extras())
         except OSError:
@@ -497,7 +507,59 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_workspace_dialog(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Workspace", "", "FlowJo workspace (*.wsp)")
         if path:
-            self.open_workspace(path)
+            self.open_in_window(path)
+
+    # --- several workspaces at once ------------------------------------------------------
+    def own(self, items) -> list:
+        """Dragged items that belong to this workspace (gates dragged in from another
+        workspace window are ignored)."""
+        out = [it for it in items if it[0] in self.samples]
+        if len(out) < len(items):
+            self.statusBar().showMessage("Gates from another workspace window can't be dropped here")
+        return out
+
+    @classmethod
+    def open_windows(cls) -> list["MainWindow"]:
+        """Workspace windows that are still open (drops closed or deleted ones)."""
+        import shiboken6
+        cls.windows[:] = [w for w in cls.windows if shiboken6.isValid(w)]
+        return [w for w in cls.windows if w.isVisible()]
+
+    def is_blank(self) -> bool:
+        """Nothing loaded and nothing to save: a workspace can be opened here."""
+        return not self.samples and self.path is None and not self.dirty
+
+    def new_workspace_window(self) -> "MainWindow":
+        """File > New Workspace: another workspace window (the current one stays open)."""
+        w = MainWindow()
+        w.resize(self.size())
+        w.move(self.pos() + QtCore.QPoint(30, 30))
+        w.show()
+        return w
+
+    def open_in_window(self, path) -> "MainWindow":
+        """Open a .wsp here if this window is empty, else in a new window; a workspace
+        that is already open is just brought forward."""
+        path = Path(path)
+        for w in MainWindow.open_windows():
+            if w.path is not None and w.path.resolve() == path.resolve():
+                w.show()
+                w.raise_()
+                w.activateWindow()
+                return w
+        target = self if self.is_blank() else self.new_workspace_window()
+        target.open_workspace(path)
+        return target
+
+    def _fill_window_menu(self) -> None:
+        self.window_menu.clear()
+        for w in MainWindow.open_windows():
+            a = self.window_menu.addAction(w.windowTitle().removeprefix("CytoGate — "),
+                                           lambda w=w: (w.show(), w.raise_(), w.activateWindow()))
+            a.setCheckable(True)
+            a.setChecked(w is self)
+        self.window_menu.addSeparator()
+        self.window_menu.addAction("New Workspace", self.new_workspace_window)
 
     # --- samples ----------------------------------------------------------
     def add_samples(self, paths) -> list[str]:
@@ -1327,4 +1389,6 @@ class MainWindow(QtWidgets.QMainWindow):
             g.close()
         self.close_table_editors()
         self.close_layout_editors()
+        if self in MainWindow.windows:
+            MainWindow.windows.remove(self)
         super().closeEvent(e)
