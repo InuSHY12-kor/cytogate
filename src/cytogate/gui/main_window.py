@@ -28,6 +28,8 @@ from ..io import FcsReadError, load_fcs
 from ..io.wsp_load import load_workspace
 from ..io.wsp_write import write_wsp
 from .graph_window import GraphWindow
+from .icons import icon
+from .widgets import Ribbon
 from .stat_dialog import StatDialog, format_stat
 
 ROLE = QtCore.Qt.ItemDataRole.UserRole
@@ -172,23 +174,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.layout_editors: list = []
         self._build_menu()
 
-        bar = self.addToolBar("Workspace")
-        bar.setMovable(False)
-        self.undo_action = bar.addAction("↶ Undo", self.undo)
+        self.undo_action = QtGui.QAction(icon("undo"), "Undo", self, triggered=self.undo)
         self.undo_action.setShortcut(QtGui.QKeySequence("Ctrl+Z"))
-        self.redo_action = bar.addAction("↷ Redo", self.redo)
+        self.redo_action = QtGui.QAction(icon("redo"), "Redo", self, triggered=self.redo)
         self.redo_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+Z"))
-        bar.addSeparator()
-        bar.addAction("Add Samples…", self.add_samples_dialog)
-        bar.addAction("Add Folder…", self.add_folder_dialog)
-        bar.addSeparator()
-        bar.addAction("New Group…", self.new_group_dialog)
-        bar.addAction("Delete Group", self.delete_current_group)
-        bar.addSeparator()
-        bar.addAction("Add Statistic…", self.add_stat_dialog)
-        bar.addAction("Apply to Group", self.apply_to_current_group)
-        bar.addAction("Rename…", self.rename_selected)
-        bar.addAction("Delete", self.delete_selected_gate)
+        self.addAction(self.undo_action)
+        self.addAction(self.redo_action)
+        self.ribbon = self._build_ribbon()
 
         self.group_list = GroupTable(self)
         self.group_list.currentItemChanged.connect(lambda *_: self._group_changed())
@@ -199,6 +191,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
         QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_F2), self.tree, activated=self.rename_selected)
+        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+D"), self.tree, activated=self.duplicate_selected)
         QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_F2), self.group_list, activated=self.rename_group_dialog)
         self.filter_edit = QtWidgets.QLineEdit(placeholderText="Filter samples (name or keyword value)")
         self.filter_edit.setClearButtonEnabled(True)
@@ -212,6 +205,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(4, 0, 4, 4)
+        layout.addWidget(self.ribbon)
         layout.addWidget(self.group_list)
         layout.addWidget(self.filter_edit)
         layout.addWidget(self.tree, 1)
@@ -224,6 +219,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autosave_timer = QtCore.QTimer(self, interval=AUTOSAVE_MINUTES * 60 * 1000)
         self.autosave_timer.timeout.connect(self.autosave)
         self.autosave_timer.start()
+
+    def _build_ribbon(self) -> Ribbon:
+        """Tabs of related commands (2nd line) over icon+label buttons (3rd line)."""
+        r = Ribbon()
+        w = r.page("Workspace")
+        w.add("New", "new", self.new_workspace_window, "New workspace window (Ctrl+N)")
+        w.add("Open", "open", self.open_workspace_dialog, "Open a FlowJo workspace (Ctrl+O)")
+        w.add("Save", "save", self.save, "Save (Ctrl+S)")
+        w.add("Save As", "save_as", self.save_as_dialog, "Save As…")
+        w.separator()
+        w.add("Undo", action=self.undo_action).setIcon(icon("undo"))
+        w.add("Redo", action=self.redo_action).setIcon(icon("redo"))
+        w.separator()
+        w.add("Add Samples", "add_samples", self.add_samples_dialog, "Add FCS files…")
+        w.add("Add Folder", "add_folder", self.add_folder_dialog, "Add every FCS file in a folder…")
+        w.add("Export", "export", self.export_dialog, "Export / Concatenate populations (FCS, CSV)…")
+        g = r.page("Groups")
+        g.add("New Group", "group_new", self.new_group_dialog, "New group from the selected samples…")
+        g.add("By Keyword", "group_keyword", self.new_keyword_group_dialog, "New group of samples with a keyword value…")
+        g.add("Rename", "group_rename", self.rename_group_dialog, "Rename the current group…")
+        g.add("Delete", "group_delete", self.delete_current_group, "Delete the current group")
+        g.separator()
+        g.add("Apply Gates", "apply_group", self.apply_to_current_group,
+              "Copy the selected gates to every sample of the current group")
+        q = r.page("Gates")
+        q.add("Add Statistic", "statistic", self.add_stat_dialog, "Add a statistic to the selected population…")
+        q.add("Rename", "rename", self.rename_selected, "Rename the selected gate (F2)")
+        q.add("Duplicate", "gate_duplicate", self.duplicate_selected, "Duplicate the selected gate (Ctrl+D)")
+        q.add("Delete", "delete", self.delete_selected_gate, "Delete the selected gate or statistic (Del)")
+        q.separator()
+        q.add("AND", "and", lambda: self.make_boolean("and"), "AND gate of the selected gates")
+        q.add("OR", "or", lambda: self.make_boolean("or"), "OR gate of the selected gates")
+        q.add("NOT", "not", lambda: self.make_boolean("not"), "NOT gate of the selected gate")
+        q.add("Combinations", "combos", self.make_combinations, "Every Boolean combination of the selected gates")
+        q.add("BifurGate", "bifur", self.bifurgate, "Split the selected histogram population automatically")
+        k = r.page("Keywords")
+        k.add("Add / Edit", "keyword", self.add_keyword_dialog, "Add or edit a keyword…")
+        k.add("Series", "series", self.keyword_series_dialog, "Keyword value series…")
+        k.add("Find / Replace", "find", self.find_replace_dialog, "Find and replace keyword values…")
+        k.add("Paste", "paste", lambda: self.paste_keywords(QtWidgets.QApplication.clipboard().text()),
+              "Paste keyword columns from a spreadsheet")
+        k.add("Columns", "columns", self.keyword_columns_dialog, "Show keyword columns…")
+        k.add("Properties", "properties", self.sample_properties, "Sample properties…")
+        c = r.page("Compensation")
+        c.add("Matrix Editor", "comp", self.compensation_dialog, "Compensation matrix editor…")
+        c.add("Remove", "comp_remove", lambda: self.apply_compensation(None, self.selected_sample_names()),
+              "Remove compensation from the selected samples")
+        c.add("Copy Transforms", "transforms", self.copy_transforms_to_group,
+              "Copy axis transforms to the current group")
+        t = r.page("Reports")
+        t.add("New Table", "new_table", lambda: self.open_table_editor(None), "Table Editor: new table")
+        t.add("Open Table", "table", lambda: self._popup(self._fill_tables_menu, self.tables_menu, t, "Open Table"),
+              "Open a table")
+        t.add("New Layout", "new_layout", lambda: self.open_layout_editor(None), "Layout Editor: new layout")
+        t.add("Open Layout", "layout", lambda: self._popup(self._fill_layouts_menu, self.layouts_menu, t, "Open Layout"),
+              "Open a layout")
+        return r
+
+    def _popup(self, fill, menu, row, text) -> None:
+        fill()
+        b = row.button(text)
+        menu.popup(b.mapToGlobal(QtCore.QPoint(0, b.height())))
 
     def _build_menu(self) -> None:
         m = self.menuBar().addMenu("File")
@@ -1000,6 +1057,7 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction("Add Statistic…", self.add_stat_dialog)
         if item.parent() is not None and item.data(0, STAT_ROLE) is None:
             m.addAction("Rename…", self.rename_selected)
+            m.addAction(icon("gate_duplicate"), "Duplicate", self.duplicate_selected)
         m.addAction("Sample Properties…", lambda: self.sample_properties(item.data(0, ROLE)[0]))
         m.addSeparator()
         m.addAction("Delete", self.delete_selected_gate)
@@ -1349,6 +1407,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.record()
         a.add_stat(path, spec)
         self.data_changed([a.name])
+
+    def duplicate_selected(self) -> list[tuple[str, tuple[str, ...]]]:
+        """Duplicate the selected gate(s) with everything below them (FlowJo: Duplicate)."""
+        items = [(n, p) for n, p in self.populations_of(self.tree.selectedItems() or [self.tree.currentItem()]) if p]
+        if not items:
+            self.statusBar().showMessage("Select a gate to duplicate")
+            return []
+        self.record()
+        made = [(n, self.samples[n].duplicate_gate(p).path) for n, p in items]
+        self.data_changed([n for n, _ in made])
+        self.select(*made[-1])
+        self.mark_dirty()
+        return made
 
     def delete_selected_gate(self):
         """Delete the selected gate (with its children) or statistic."""

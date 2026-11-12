@@ -92,6 +92,13 @@ class AnalyzedSample:
         self.invalidate()
         return pop
 
+    def duplicate_gate(self, path) -> Population:
+        """FlowJo's Duplicate: a copy named "<name> copy" (numbered if taken)."""
+        path = tuple(path)
+        pop = self.gates.duplicate(path, self.unique_name(path[:-1], f"{path[-1]} copy"))
+        self.invalidate()
+        return pop
+
     def remove_gate(self, path) -> None:
         self.gates.remove(path)
         self.invalidate()

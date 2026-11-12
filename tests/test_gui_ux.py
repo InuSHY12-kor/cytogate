@@ -55,7 +55,7 @@ def test_icons_and_pointer(win):
     assert g.pointer_action.isChecked() and g.view.viewbox.tool is None
     for tool in TOOLS:
         assert not g.tool_actions[tool].icon().isNull() and g.tool_actions[tool].toolTip()
-    assert g.tool_bar.toolButtonStyle() == QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly
+    assert g.tool_bar.button("Polygon").toolButtonStyle() == QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly
     assert not g.up_btn.icon().isNull() and not g.prev_btn.icon().isNull()
     g.tool_actions["Polygon"].trigger()
     assert g.view.viewbox.tool == "Polygon" and not g.pointer_action.isChecked()
@@ -166,3 +166,74 @@ def test_several_workspaces(win, tmp_path):
     finally:
         close(w2)
     assert w2 not in MainWindow.open_windows()
+
+
+# --- round 2 -------------------------------------------------------------------------------
+
+def test_back_to_pointer_after_a_gate(win, monkeypatch):
+    g = win.open_graph(E01, ())
+    monkeypatch.setattr(g, "ask_gate_name", lambda default: "Box")
+    g.tool_actions["Rectangle"].trigger()
+    g.shape_drawn("Rectangle", [(0.2, 0.2), (0.4, 0.4)])
+    assert ("Box",) in win.samples[E01].gates.paths()
+    assert g.pointer_action.isChecked() and g.view.viewbox.tool is None
+    g.tool_actions["Polygon"].trigger()
+    monkeypatch.setattr(g, "ask_gate_name", lambda default: None)  # cancelled name: still back to pointer
+    g.shape_drawn("Polygon", [(0.1, 0.1), (0.2, 0.1), (0.2, 0.2)])
+    assert g.pointer_action.isChecked()
+
+
+def test_rows_wrap_and_breadcrumb_icons(win):
+    g = win.open_graph(E01, ("Cells",))
+    row = g.tool_bar
+    wide, narrow = row.flow.heightForWidth(900), row.flow.heightForWidth(150)
+    assert narrow > wide  # buttons move to further lines instead of hiding behind "»"
+    assert g.nav.indexOf(g.tool_bar) == 0 and g.nav.indexOf(g.crumb_row) == 1  # path is below the tools
+    crumbs = [g.crumbs.itemAt(i).widget() for i in range(g.crumbs.count())
+              if g.crumbs.itemAt(i).widget().objectName() == "crumb"]
+    assert [c.text() for c in crumbs] == [E01, "Cells"] and all(not c.icon().isNull() for c in crumbs)
+
+
+def test_workspace_ribbon(win):
+    r = win.ribbon
+    assert list(r.pages) == ["Workspace", "Groups", "Gates", "Keywords", "Compensation", "Reports"]
+    assert r.pages["Workspace"].isVisible() and not r.pages["Gates"].isVisible()
+    r.select("Gates")
+    assert r.pages["Gates"].isVisible() and not r.pages["Workspace"].isVisible()
+    b = r.button("Gates", "Duplicate")
+    assert b.toolButtonStyle() == QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon and not b.icon().isNull()
+    assert r.tabs.tabIcon(0).isNull()  # tabs are text only
+    assert r.pages["Gates"].flow.heightForWidth(200) > r.pages["Gates"].flow.heightForWidth(1200)
+    for editor in (win.open_table_editor(show=False), win.open_layout_editor(show=False)):
+        assert all(not bt.icon().isNull() for bt in editor.buttons.buttons.values())
+        assert not editor.findChildren(QtWidgets.QToolBar)
+
+
+def test_duplicate_gate(win):
+    a = win.samples[E01]
+    a.add_gate(("Cells",), "Big", RectangleGate(("FSC-A",), (100000.0,), (None,)))
+    from cytogate.core.gating import BooleanGate
+    a.add_gate(("Cells",), "not Big", BooleanGate("not", (("Cells", "Big"),)))
+    from cytogate.core.stats import Stat, StatSpec
+    a.add_stat(("Cells",), StatSpec(Stat.MEDIAN, "FSC-A"))
+    win.data_changed([E01])
+    win.select(E01, ("Cells",))
+    made = win.duplicate_selected()
+    assert made == [(E01, ("Cells copy",))]
+    paths = a.gates.paths()
+    assert ("Cells copy", "Big") in paths and ("Cells copy", "not Big") in paths
+    assert a.gates.get(("Cells copy", "not Big")).gate.refs == (("Cells copy", "Big"),)  # points into the copy
+    assert a.count(("Cells copy", "not Big")) == a.count(("Cells", "not Big"))
+    assert a.gates.get(("Cells copy",)).stats == a.gates.get(("Cells",)).stats
+    assert [c.name for c in a.gates.root.children][:2] == ["Cells", "Cells copy"]  # right after the original
+    win.select(E01, ("Cells",))
+    assert win.duplicate_selected() == [(E01, ("Cells copy 2",))]
+    win.undo()
+    assert ("Cells copy 2",) not in a.gates.paths()
+    item = win.find_item(E01, ("Cells",))
+    win.tree.setCurrentItem(item)
+    pos = win.tree.visualItemRect(item).center()
+    win._tree_menu(pos)
+    menu = win.findChildren(QtWidgets.QMenu)[-1]
+    assert "Duplicate" in [act.text() for act in menu.actions()]
+    menu.close()

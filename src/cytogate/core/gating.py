@@ -356,6 +356,37 @@ class GatingTree:
         pop = self.get(path)
         pop.parent.children.remove(pop)
 
+    def duplicate(self, path, new_name: str) -> Population:
+        """Copy a population with everything below it (gates, statistics, label
+        positions) next to the original under `new_name`. Boolean gates inside the
+        copy that pointed into the original now point into the copy. The copy
+        belongs to this sample only (no owning group)."""
+        import copy
+        import dataclasses
+        src = self.get(path)
+        old = src.path
+        parent = src.parent
+        if any(c.name == new_name for c in parent.children):
+            raise ValueError(f"{'/'.join(parent.path + (new_name,))} already exists")
+        new = parent.path + (new_name,)
+
+        def repoint(gate):
+            if isinstance(gate, BooleanGate):
+                refs = tuple(new + r[len(old):] if r[:len(old)] == old else r for r in gate.refs)
+                return dataclasses.replace(gate, refs=refs)
+            return gate
+
+        def clone(node, name, new_parent):
+            c = Population(name, repoint(copy.deepcopy(node.gate)), parent=new_parent,
+                           label_offset=node.label_offset, stats=copy.deepcopy(node.stats),
+                           owning_group=None, tint=node.tint)
+            c.children = [clone(ch, ch.name, c) for ch in node.children]
+            return c
+
+        dup = clone(src, new_name, parent)
+        parent.children.insert(parent.children.index(src) + 1, dup)
+        return dup
+
     def replace_gate(self, path, gate: Gate) -> Population:
         """Change a population's gate, keeping its children and statistics."""
         pop = self.get(path)
