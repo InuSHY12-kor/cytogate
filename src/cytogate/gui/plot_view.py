@@ -236,17 +236,22 @@ class GateHandle(pg.GraphicsObject):
 class GateLabel(pg.TextItem):
     """Gate name + frequency that the user can drag anywhere on the plot.
 
-    Drag with the left button to move it; double-click to put it back.
-    Ignored while a gate tool is active, so drawing over a label still works.
+    Drag with the left button to move it; double-click it (or within MARGIN
+    pixels of it) to open the gate in its own graph window; right-click for
+    "Reset Label Position". Ignored while a gate tool is active, so drawing over
+    a label still works.
     """
 
-    def __init__(self, text, anchor, base, offset, y_scale, viewbox, on_moved):
+    MARGIN = 15  # pixels around the text that still count as the label
+
+    def __init__(self, text, anchor, base, offset, y_scale, viewbox, on_moved, on_open=None):
         super().__init__(text, color=(0, 0, 0), anchor=anchor)
         self.base = np.array(base, dtype=float)
         self.y_scale = y_scale  # view units per display unit on y (histogram counts)
         self.offset = np.array(offset, dtype=float)
         self.vb = viewbox
         self.on_moved = on_moved
+        self.on_open = on_open
         self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         self._apply()
 
@@ -260,6 +265,12 @@ class GateLabel(pg.TextItem):
         if ev.button() != QtCore.Qt.MouseButton.LeftButton or not self._movable():
             ev.ignore()
             return
+        if ev.isStart() and not super().boundingRect().contains(ev.buttonDownPos()):
+            ev.ignore()  # the margin is for double-clicks; a drag there moves the gate
+            return
+        if not hasattr(self, "_start") and not ev.isStart():
+            ev.ignore()
+            return
         ev.accept()
         if ev.isStart():
             self._start = self.offset.copy()
@@ -268,14 +279,38 @@ class GateLabel(pg.TextItem):
         self.offset = self._start + np.array([p1.x() - p0.x(), (p1.y() - p0.y()) / self.y_scale])
         self._apply()
         if ev.isFinish():
+            del self._start
             self.on_moved((float(self.offset[0]), float(self.offset[1])))
 
-    def mouseClickEvent(self, ev):
-        if ev.double() and self._movable():
-            ev.accept()
-            self.offset = np.zeros(2)
-            self._apply()
+    def boundingRect(self):
+        m = self.MARGIN
+        return super().boundingRect().adjusted(-m, -m, m, m)
+
+    def shape(self):
+        path = QtGui.QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
+
+    def reset_position(self) -> None:
+        self.offset = np.zeros(2)
+        self._apply()
+        if self.on_moved:
             self.on_moved((0.0, 0.0))
+
+    def mouseClickEvent(self, ev):
+        if self.vb.tool is not None:
+            ev.ignore()
+            return
+        if ev.button() == QtCore.Qt.MouseButton.LeftButton and ev.double() and self.on_open:
+            ev.accept()
+            self.on_open()
+        elif ev.button() == QtCore.Qt.MouseButton.RightButton and self.on_moved:
+            ev.accept()
+            m = QtWidgets.QMenu()
+            if self.on_open:
+                m.addAction("Open Gate in New Graph", self.on_open)
+            m.addAction("Reset Label Position", self.reset_position)
+            m.exec(ev.screenPos().toPoint())
         else:
             ev.ignore()
 
@@ -375,7 +410,8 @@ class PlotView(QtWidgets.QWidget):
             self.gate_items.append(curve)
             if text:
                 label = GateLabel(text, anchor, base, offset, top, self.viewbox,
-                                  (lambda off, k=key: on_label_moved(k, off)) if on_label_moved else None)
+                                  (lambda off, k=key: on_label_moved(k, off)) if on_label_moved else None,
+                                  on_open=(lambda k=key: on_open(k)) if on_open else None)
                 label.setZValue(20)  # labels sit above gate areas so they can be dragged
                 self.plot.addItem(label, ignoreBounds=True)
                 self.gate_items.append(label)

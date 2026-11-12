@@ -22,6 +22,7 @@ from ..core.workspace import ALL_SAMPLES
 from ..plots.render import HistogramY, PlotType
 from .layout_output import FORMATS, export_layout
 from .layout_render import paint_item
+from .widgets import ButtonRow
 
 BATCH = "(batch)"
 HANDLE = 8.0
@@ -179,10 +180,16 @@ class LayoutEditor(QtWidgets.QMainWindow):
         self.resize(1100, 820)
         self.scene = QtWidgets.QGraphicsScene(self)
         self.view = PageView(self)
-        self.setCentralWidget(self.view)
+        central = QtWidgets.QWidget()
+        self._central_layout = QtWidgets.QVBoxLayout(central)
+        self._central_layout.setContentsMargins(0, 0, 0, 0)
+        self._central_layout.setSpacing(0)
+        self.setCentralWidget(central)
         self.graphics: list[ItemGraphic] = []
         self._building = False
         self._build_toolbar()
+        self._central_layout.addWidget(self.buttons)
+        self._central_layout.addWidget(self.view, 1)
         self._build_docks()
         self.scene.selectionChanged.connect(self._selection_changed)
         QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Delete, self, activated=self.delete_selected)
@@ -190,21 +197,21 @@ class LayoutEditor(QtWidgets.QMainWindow):
 
     # --- construction ---------------------------------------------------------------------
     def _build_toolbar(self) -> None:
-        bar = self.addToolBar("Layout")
-        bar.setMovable(False)
-        bar.addAction("Text", lambda: self.add_item(LayoutItem(kind="text", text="Text", w=200, h=24, font_size=12)))
-        bar.addAction("Rectangle", lambda: self.add_item(LayoutItem(kind="shape", shape="rect", w=120, h=80)))
-        bar.addAction("Ellipse", lambda: self.add_item(LayoutItem(kind="shape", shape="ellipse", w=120, h=80)))
-        bar.addAction("Line", lambda: self.add_item(LayoutItem(kind="shape", shape="line", w=120, h=0.1)))
-        bar.addAction("Table…", self.add_table_dialog)
-        bar.addSeparator()
-        bar.addAction("Backgate…", self.backgate_selected)
-        bar.addAction("Arrange Grid…", self.arrange_dialog)
-        bar.addAction("Front", lambda: self.restack(front=True))
-        bar.addAction("Back", lambda: self.restack(front=False))
-        bar.addAction("Delete", self.delete_selected)
-        bar.addSeparator()
-        bar.addAction("Batch / Export…", self.export_dialog)
+        bar = self.buttons = ButtonRow(size=22)
+        bar.add("Text", "text", lambda: self.add_item(LayoutItem(kind="text", text="Text", w=200, h=24, font_size=12)),
+                "Add text ({Name}, {Count}, keywords … are filled in)")
+        bar.add("Rectangle", "rect", lambda: self.add_item(LayoutItem(kind="shape", shape="rect", w=120, h=80)))
+        bar.add("Ellipse", "ellipse", lambda: self.add_item(LayoutItem(kind="shape", shape="ellipse", w=120, h=80)))
+        bar.add("Line", "line", lambda: self.add_item(LayoutItem(kind="shape", shape="line", w=120, h=0.1)))
+        bar.add("Table", "table", self.add_table_dialog, "Add a Table Editor table…")
+        bar.separator()
+        bar.add("Backgate", "backgate", self.backgate_selected, "Backgate the selected graph…")
+        bar.add("Arrange Grid", "grid", self.arrange_dialog, "Arrange items in a grid…")
+        bar.add("Front", "front", lambda: self.restack(front=True), "Bring to front")
+        bar.add("Back", "back", lambda: self.restack(front=False), "Send to back")
+        bar.add("Delete", "delete", self.delete_selected, "Delete the selected items (Del)")
+        bar.separator()
+        bar.add("Batch / Export", "export", self.export_dialog, "Batch and export: PDF, PNG, SVG, PowerPoint, web page…")
         m = self.menuBar().addMenu("Figure Presets")
         m.addAction("Save Layout as Preset…", self.save_preset_dialog)
         self.preset_menu = m.addMenu("New from Preset")

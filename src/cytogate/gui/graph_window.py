@@ -29,6 +29,7 @@ from ..core.gating import move_vertex, scale_gate, translate_gate
 from ..plots import HistogramY, PlotType
 from .gate_tools import HISTOGRAM_TOOLS, TOOLS
 from .icons import icon
+from .widgets import ButtonRow, FlowLayout
 
 TOOL_TIPS = {
     "Rectangle": "Rectangle gate — drag a box", "Polygon": "Polygon gate — click points, double-click to close",
@@ -254,7 +255,6 @@ class GraphWindow(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setMenuBar(self.menu_bar)
         layout.addLayout(self.nav)
-        layout.addWidget(self.tool_bar)
         layout.addWidget(self.warning)
         layout.addLayout(self.plot_grid, 1)
         layout.addWidget(self.options_panel)
@@ -331,60 +331,46 @@ class GraphWindow(QtWidgets.QWidget):
         A["next_y"] = self._act(go, "Next Y", lambda: self.step_param("y", +1))
 
     def _build_top(self) -> None:
-        nav = self.nav = QtWidgets.QHBoxLayout()
-        self.undo_btn = QtWidgets.QToolButton(text="↶", toolTip="Undo (Ctrl+Z)")
-        self.redo_btn = QtWidgets.QToolButton(text="↷", toolTip="Redo (Ctrl+Shift+Z)")
-        self.prev_btn = QtWidgets.QToolButton(text="◀", toolTip="Previous sample (Shift: all graphs of this sample)")
-        self.next_btn = QtWidgets.QToolButton(text="▶", toolTip="Next sample (Shift: all graphs of this sample)")
-        self.up_btn = QtWidgets.QToolButton(text="▲", toolTip="Up to parent population")
-        self.down_btn = QtWidgets.QToolButton(text="▼", toolTip="Open child population")
-        self.undo_btn.clicked.connect(lambda: self.main.undo())
-        self.redo_btn.clicked.connect(lambda: self.main.redo())
-        self.prev_btn.clicked.connect(lambda: self._arrow(-1))
-        self.next_btn.clicked.connect(lambda: self._arrow(+1))
-        self.up_btn.clicked.connect(self.go_up)
-        self.down_btn.clicked.connect(self.go_down)
-        for b, name in ((self.undo_btn, "undo"), (self.redo_btn, "redo"), (self.prev_btn, "left"),
-                        (self.next_btn, "right"), (self.up_btn, "up"), (self.down_btn, "down")):
-            b.setIcon(icon(name))
-            b.setIconSize(QtCore.QSize(20, 20))
-            b.setAutoRaise(True)
-        for b in (self.undo_btn, self.redo_btn):
-            nav.addWidget(b)
-        nav.addSpacing(6)
-        for b in (self.prev_btn, self.next_btn, self.up_btn, self.down_btn):
-            nav.addWidget(b)
-        self.crumbs = QtWidgets.QHBoxLayout()
-        self.crumbs.setSpacing(0)
-        nav.addSpacing(8)
-        nav.addLayout(self.crumbs)
-        nav.addStretch(1)
-        self.dup_btn = QtWidgets.QToolButton(text="⧉", toolTip="Duplicate View")
-        self.dup_btn.clicked.connect(self.duplicate_view)
-        self.dup_btn.setIcon(icon("duplicate"))
-        self.dup_btn.setIconSize(QtCore.QSize(20, 20))
-        self.dup_btn.setAutoRaise(True)
-        nav.addWidget(self.dup_btn)
-
-        self.tool_bar = QtWidgets.QToolBar()
+        """Row 1: pointer + gate tools, undo/redo, ◀ ▶ ▲ ▼, duplicate (wraps when narrow).
+        Row 2: the gating path (sample › gate › gate) with small icons, as in FlowJo."""
+        row = self.tool_bar = ButtonRow(size=20)
         self.tool_group = QtGui.QActionGroup(self)
         self.tool_group.setExclusionPolicy(QtGui.QActionGroup.ExclusionPolicy.ExclusiveOptional)
         self.tool_actions: dict[str, QtGui.QAction] = {}
-        self.tool_bar.setIconSize(QtCore.QSize(22, 22))
-        self.tool_bar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.pointer_action = self.tool_bar.addAction(icon("Pointer"), "Pointer")
+        self.pointer_action = QtGui.QAction(icon("Pointer"), "Pointer", self)
         self.pointer_action.setToolTip("Select / move gates (Esc)")
         self.pointer_action.setCheckable(True)
         self.pointer_action.setChecked(True)
         self.tool_group.addAction(self.pointer_action)
+        row.add("Pointer", action=self.pointer_action)
         for tool in TOOLS:
-            act = self.tool_bar.addAction(icon(tool), tool)
+            act = QtGui.QAction(icon(tool), tool, self)
             act.setToolTip(TOOL_TIPS.get(tool, tool))
             act.setData(tool)
             act.setCheckable(True)
             self.tool_group.addAction(act)
             self.tool_actions[tool] = act
+            row.add(tool, action=act)
         self.tool_group.triggered.connect(self._tool_changed)
+        row.separator()
+        self.undo_btn = row.add("Undo", "undo", lambda: self.main.undo(), "Undo (Ctrl+Z)")
+        self.redo_btn = row.add("Redo", "redo", lambda: self.main.redo(), "Redo (Ctrl+Shift+Z)")
+        row.separator()
+        self.up_btn = row.add("Up", "up", self.go_up, "Up to parent population")
+        self.down_btn = row.add("Down", "down", self.go_down, "Open child population")
+        self.prev_btn = row.add("Previous", "left", lambda: self._arrow(-1),
+                                "Previous sample (Shift: all graphs of this sample)")
+        self.next_btn = row.add("Next", "right", lambda: self._arrow(+1),
+                                "Next sample (Shift: all graphs of this sample)")
+        row.separator()
+        self.dup_btn = row.add("Duplicate View", "duplicate", self.duplicate_view, "Duplicate View")
+
+        self.crumb_row = QtWidgets.QWidget()
+        self.crumbs = FlowLayout(self.crumb_row, spacing=0, margin=1)
+        self.nav = QtWidgets.QVBoxLayout()
+        self.nav.setSpacing(0)
+        self.nav.addWidget(self.tool_bar)
+        self.nav.addWidget(self.crumb_row)
 
         self.warning = QtWidgets.QLabel()
         self.warning.setStyleSheet("color: #c00000; font-weight: bold;")
@@ -627,9 +613,16 @@ class GraphWindow(QtWidgets.QWidget):
         def crumb(text, path):
             b = QtWidgets.QToolButton(text=text)
             b.setAutoRaise(True)
+            b.setIcon(icon("sample" if not path else "gate"))
+            b.setIconSize(QtCore.QSize(16, 16))
+            b.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             b.setObjectName("crumb")
-            b.setEnabled(path != self.path)
-            b.clicked.connect(lambda _=False, p=path: self.show_population(self.sample_name, p))
+            if path == self.path:  # where we are: bold, not greyed out
+                f = b.font()
+                f.setBold(True)
+                b.setFont(f)
+            else:
+                b.clicked.connect(lambda _=False, p=path: self.show_population(self.sample_name, p))
             self.crumbs.addWidget(b)
 
         menu_button("▸", [(n, lambda n=n: self.show_population(n, ())) for n in self.main.visible_samples()])
@@ -883,6 +876,9 @@ class GraphWindow(QtWidgets.QWidget):
         g = self.main.open_graph(sample, path)  # brings an existing window forward
         if len(self.main.graphs) > before:  # a new one: put it beside this window, like FlowJo
             g.move(self.geometry().right() + 8, self.geometry().top())
+        g.raise_()
+        g.activateWindow()  # keep gating there: its tools and keys act on the new window
+        g.setFocus()
         return g
 
     def select_pointer(self) -> None:
@@ -915,7 +911,14 @@ class GraphWindow(QtWidgets.QWidget):
         return name.strip() if ok and name.strip() else None
 
     def shape_drawn(self, tool: str, pts) -> list[tuple[str, ...]]:
-        """Turn a drawn shape (display units) into gate(s) under this population."""
+        """Turn a drawn shape (display units) into gate(s) under this population;
+        afterwards the pointer is selected again (FlowJo: one gate per tool click)."""
+        try:
+            return self._make_gates(tool, pts)
+        finally:
+            self.select_pointer()
+
+    def _make_gates(self, tool: str, pts) -> list[tuple[str, ...]]:
         a, parent, x, y = self.analysis, self.path, self.x, self.y
         ps = a.ps
         self.last_tool = tool  # the tool behind the gate being named

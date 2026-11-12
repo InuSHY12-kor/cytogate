@@ -253,13 +253,16 @@ def test_drag_histogram_label(win, g):
     assert win.samples[E01].gates.get(("Range",)).label_offset == pytest.approx((-0.2, 0.2), abs=0.03)
 
 
-def test_label_double_click_resets(win, g):
+def test_label_double_click_opens_gate_and_reset(win, g):
     g.shape_drawn("Rectangle", [(0.2, 0.05), (0.6, 0.35)])
     pop = win.samples[E01].gates.get(("Rectangle",))
     pop.label_offset = (0.3, 0.3)
     g.redraw()
 
     class Ev:
+        def button(self):
+            return QtCore.Qt.MouseButton.LeftButton
+
         def double(self):
             return True
 
@@ -269,7 +272,15 @@ def test_label_double_click_resets(win, g):
         def ignore(self):
             pass
 
-    g.view.gate_labels()[0].mouseClickEvent(Ev())
+    n = len(win.graphs)
+    label = g.view.gate_labels()[0]
+    label.mouseClickEvent(Ev())  # double-click the name: the gate opens in a new graph window
+    assert len(win.graphs) == n + 1 and win.graphs[-1].path == ("Rectangle",)
+    assert pop.label_offset == (0.3, 0.3)
+    # the label reacts within 15 px around its text
+    r = label.boundingRect()
+    assert label.shape().contains(QtCore.QPointF(r.left() + 3, r.top() + 3))
+    label.reset_position()  # right-click > Reset Label Position
     assert pop.label_offset == (0.0, 0.0)
 
 

@@ -14,6 +14,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..core.stats import Stat, StatSpec
 from ..core.table import Column, TableDef, compute_table, export_table, heat_colors, table_from_json, table_to_json
 from ..core.workspace import ALL_SAMPLES
+from .widgets import ButtonRow
 
 EXPORT_FILTER = "CSV (*.csv);;Text, tab separated (*.txt);;Excel (*.xlsx);;Web page (*.html)"
 HEADERS = ["Column", "Kind", "Heading", "Show", "Control", "Heat map", "Tube", "Discriminator"]
@@ -50,18 +51,17 @@ class TableEditor(QtWidgets.QMainWindow):
         self._filling = False
         self.resize(900, 420)
 
-        bar = self.addToolBar("Table")
-        bar.setMovable(False)
-        bar.addAction("Add Statistic…", self.add_stat_dialog)
-        bar.addAction("Add Keyword…", self.add_keyword_dialog)
-        bar.addAction("Add Formula…", self.add_formula_dialog)
-        bar.addAction("Remove", self.remove_selected)
-        bar.addAction("▲", lambda: self.move_selected(-1))
-        bar.addAction("▼", lambda: self.move_selected(1))
-        bar.addSeparator()
-        bar.addAction("Create Table", self.show_result)
-        bar.addAction("To File…", self.export_dialog)
-        bar.addAction("Copy", self.copy_to_clipboard)
+        bar = self.buttons = ButtonRow(size=22)
+        bar.add("Add Statistic", "statistic", self.add_stat_dialog, "Add a statistic column…")
+        bar.add("Add Keyword", "keyword", self.add_keyword_dialog, "Add a keyword column…")
+        bar.add("Add Formula", "formula", self.add_formula_dialog, "Add a formula column…")
+        bar.add("Remove", "remove", self.remove_selected, "Remove the selected columns")
+        bar.add("Move Up", "up", lambda: self.move_selected(-1), "Move the selected column up")
+        bar.add("Move Down", "down", lambda: self.move_selected(1), "Move the selected column down")
+        bar.separator()
+        bar.add("Create Table", "run", self.show_result, "Create the table")
+        bar.add("To File", "export", self.export_dialog, "Save the table (CSV, TXT, Excel, web page)…")
+        bar.add("Copy", "copy", self.copy_to_clipboard, "Copy the table to the clipboard")
 
         self.name_edit = QtWidgets.QLineEdit(self.table.name)
         self.name_edit.textChanged.connect(self._options_changed)
@@ -97,6 +97,7 @@ class TableEditor(QtWidgets.QMainWindow):
         split.addWidget(self.result)
         central = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(central)
+        lay.addWidget(self.buttons)
         lay.addLayout(top)
         lay.addWidget(QtWidgets.QLabel("Drag populations or statistics here from the workspace."))
         lay.addWidget(split, 1)
