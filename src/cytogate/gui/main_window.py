@@ -152,6 +152,16 @@ class GroupTable(QtWidgets.QTreeWidget):
             e.acceptProposedAction()
 
 
+def _untitled_dir() -> Path:
+    """Autosaves of never-saved workspaces: the home folder, or the portable settings folder."""
+    from ..paths import app_home, is_portable
+    if is_portable():
+        d = app_home()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    return Path.home()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     windows: list["MainWindow"] = []  # every open workspace window
 
@@ -475,8 +485,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.dirty or not self.samples:
             return None
         target = (self.path.with_name(self.path.stem + ".autosave.wsp") if self.path
-                  else Path.home() / ("CytoGate-autosave.wsp" if self.untitled_no == 1
-                                      else f"CytoGate-autosave-{self.untitled_no}.wsp"))
+                  else _untitled_dir() / ("CytoGate-autosave.wsp" if self.untitled_no == 1
+                                          else f"CytoGate-autosave-{self.untitled_no}.wsp"))
         try:
             write_wsp(target, self.ws, extras=self.collect_extras())
         except OSError:
