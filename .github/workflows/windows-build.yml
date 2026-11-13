@@ -43,25 +43,66 @@ jobs:
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
 
-      - name: Zip
-        id: zip
+      - name: Version
+        id: ver
         shell: pwsh
         run: |
           $v = python -c "import cytogate; print(cytogate.__version__)"
-          $name = "CytoGate-$v-windows-x64.zip"
-          Compress-Archive -Path dist\CytoGate -DestinationPath $name
-          "name=$name" >> $env:GITHUB_OUTPUT
+          "v=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.v }}"
+          New-Item -ItemType Directory -Force portable | Out-Null
+          Copy-Item -Recurse dist\CytoGate portable\CytoGate
+          Copy-Item packaging\portable.txt portable\CytoGate\portable.txt
+          $p = Start-Process -FilePath "portable\CytoGate\CytoGate.exe" -ArgumentList "--selftest","selftest-portable.txt" -Wait -PassThru
+          Get-Content selftest-portable.txt
+          if ($p.ExitCode -ne 0) { throw "portable selftest failed" }
+          Compress-Archive -Path portable\CytoGate -DestinationPath "CytoGate-$v-windows-x64-portable.zip"
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.v }}"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc packaging\cytogate.iss "/DAppVersion=$v" "/DSourceDir=$PWD\dist\CytoGate" "/DOutputDir=$PWD\installer"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-ChildItem installer
+
+      - name: Test the installer (install, self-test, uninstall)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.v }}"
+          $dir = Join-Path $env:RUNNER_TEMP "CytoGateInstalled"
+          $p = Start-Process -FilePath "installer\CytoGate-$v-Setup.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/DIR=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "setup failed ($($p.ExitCode))" }
+          $p = Start-Process -FilePath "$dir\CytoGate.exe" -ArgumentList "--selftest","selftest-installed.txt" -Wait -PassThru
+          Get-Content selftest-installed.txt
+          if ($p.ExitCode -ne 0) { throw "installed selftest failed" }
+          $p = Start-Process -FilePath "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait -PassThru
+          Start-Sleep -Seconds 3
+          if (Test-Path "$dir\CytoGate.exe") { throw "uninstall left the program behind" }
+          Compress-Archive -Path "installer\CytoGate-$v-Setup.exe" -DestinationPath "CytoGate-$v-windows-x64-setup.zip"
 
       - uses: actions/upload-artifact@v4
         with:
           name: CytoGate-windows-x64
           path: |
-            ${{ steps.zip.outputs.name }}
-            selftest.txt
+            CytoGate-${{ steps.ver.outputs.v }}-windows-x64-setup.zip
+            CytoGate-${{ steps.ver.outputs.v }}-windows-x64-portable.zip
+            selftest*.txt
 
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.zip.outputs.name }}
+          files: |
+            CytoGate-${{ steps.ver.outputs.v }}-windows-x64-setup.zip
+            CytoGate-${{ steps.ver.outputs.v }}-windows-x64-portable.zip
           generate_release_notes: true

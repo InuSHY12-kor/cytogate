@@ -1,0 +1,8 @@
+CytoGate portable
+
+This file makes CytoGate keep its settings (transform presets, figure presets,
+autosaves of untitled workspaces) in the "settings" folder next to CytoGate.exe
+instead of in your user profile. Delete this file to use the profile instead.
+
+Run CytoGate.exe to start. To check the installation:
+    CytoGate.exe --selftest result.txt

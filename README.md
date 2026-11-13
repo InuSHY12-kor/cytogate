@@ -14,12 +14,16 @@
 
 ## 설치 (Windows, Python 없이)
 
-1. GitHub 저장소의 **Releases**에서 `CytoGate-<버전>-windows-x64.zip`을 받습니다.
-   (최신 개발 빌드는 **Actions → Windows build → 마지막 실행 → Artifacts**에 있습니다.)
-2. 압축을 풀고 `CytoGate` 폴더 안의 **`CytoGate.exe`**를 더블클릭합니다. 설치 과정은 없습니다.
-3. 처음 실행할 때 Windows SmartScreen이 "알 수 없는 게시자" 경고를 띄우면 **추가 정보 → 실행**을 누릅니다
-   (코드 서명 인증서가 없는 개인 프로그램이라 뜨는 경고입니다).
-4. 동작 확인: 명령 프롬프트에서 `CytoGate.exe --selftest 결과.txt`를 실행하면 읽기·게이팅·통계·모든 저장 형식을 점검하고 결과를 파일에 씁니다.
+GitHub 저장소의 **Releases**에서 둘 중 하나를 받습니다.
+
+| 파일 | 용도 |
+|---|---|
+| `CytoGate-<버전>-windows-x64-setup.zip` | **설치판.** 압축을 풀고 `CytoGate-<버전>-Setup.exe`를 실행하면 시작 메뉴(선택: 바탕화면) 바로가기와 제거 프로그램이 생깁니다. 관리자 권한 없이 내 계정에만 설치됩니다. `.wsp` 파일을 CytoGate로 여는 연결도 고를 수 있습니다. |
+| `CytoGate-<버전>-windows-x64-portable.zip` | **포터블판.** 압축을 푼 `CytoGate` 폴더의 `CytoGate.exe`를 바로 실행합니다. 설정(변환·그림 양식, 이름 없는 작업의 자동 저장)은 그 폴더 안 `settings`에 저장되어 USB에 넣고 다닐 수 있고, 컴퓨터에 아무것도 남기지 않습니다. 폴더째 지우면 끝입니다. |
+
+- 처음 실행할 때 Windows SmartScreen이 "알 수 없는 게시자" 경고를 띄우면 **추가 정보 → 실행**을 누릅니다 (코드 서명 인증서가 없는 개인 프로그램이라 뜨는 경고).
+- 최신 개발 빌드는 **Actions → Windows build → 마지막 실행 → Artifacts**에도 있습니다.
+- 동작 확인: 명령 프롬프트에서 `CytoGate.exe --selftest 결과.txt`
 
 ## 실행 (Windows, 소스에서)
 

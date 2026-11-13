@@ -26,8 +26,12 @@ def main(argv: list[str] | None = None) -> int:
         app.setWindowIcon(QtGui.QIcon(str(icon)))
     win = MainWindow()
     win.show()
-    if argv:
-        win.add_samples(argv)
+    workspaces = [a for a in argv if a.lower().endswith(".wsp")]
+    others = [a for a in argv if not a.lower().endswith(".wsp")]
+    for path in workspaces:  # double-clicked .wsp files: each in its own workspace window
+        win.open_in_window(path)
+    if others:
+        win.add_samples(others)
     return app.exec()
 
 

@@ -275,7 +275,8 @@ def layout_from_json(d: dict) -> Layout:
 # --- figure presets (F4) ---------------------------------------------------------------------------
 
 def presets_dir() -> Path:
-    base = os.environ.get("CYTOGATE_HOME") or Path.home() / ".cytogate"
+    from ..paths import app_home
+    base = app_home()
     return Path(base) / "layout_presets"
 
 

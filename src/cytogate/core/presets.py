@@ -18,7 +18,8 @@ __all__ = ["presets_file", "load_presets", "save_preset", "remove_preset", "appl
 
 
 def presets_file() -> Path:
-    base = os.environ.get("CYTOGATE_HOME") or Path.home() / ".cytogate"
+    from ..paths import app_home
+    base = app_home()
     return Path(base) / "transform_presets.json"
 
 

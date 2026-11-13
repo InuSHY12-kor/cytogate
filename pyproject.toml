@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cytogate"
-version = "0.9.2"
+version = "0.9.3"
 description = "Personal flow cytometry analysis desktop app with FlowJo-compatible outputs"
 readme = "README.md"
 requires-python = ">=3.11"
